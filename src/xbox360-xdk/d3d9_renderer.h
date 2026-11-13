@@ -6,6 +6,7 @@
 #define D3D9_MAX_QUADS 2048
 #define D3D9_VERTS_PER_QUAD 4
 #define D3D9_INDICES_PER_QUAD 6
+#define D3D9_MAX_PRIMITIVE_VERTICES 8192
 
 // Vertex: position(4f), texcoord(2f), color(4f)
 #define D3D9_VERTEX_STRIDE 40
@@ -26,6 +27,12 @@ typedef struct {
     int32_t quadCount;
     int32_t currentTextureIndex;
     uint8_t* vertexData; // CPU-side staging (D3D9_MAX_QUADS * D3D9_VERTS_PER_QUAD * D3D9_VERTEX_STRIDE)
+    void* primitiveVertexData;
+    uint32_t primitiveVertexCount;
+    uint32_t primitiveVertexCapacity;
+    int32_t primitiveType;
+    int32_t primitiveTexture;
+    bool primitiveActive;
 
     // Textures loaded from TXTR pages (decoded PNG -> D3D textures)
     void** textures;     // IDirect3DTexture9*[]
