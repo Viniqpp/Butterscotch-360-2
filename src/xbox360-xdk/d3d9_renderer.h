@@ -27,6 +27,7 @@ typedef struct {
     int32_t quadCount;
     int32_t currentTextureIndex;
     uint8_t* vertexData; // CPU-side staging (D3D9_MAX_QUADS * D3D9_VERTS_PER_QUAD * D3D9_VERTEX_STRIDE)
+    void* triangleData; // expanded triangle-list staging (6 vertices per quad)
     void* primitiveVertexData;
     uint32_t primitiveVertexCount;
     uint32_t primitiveVertexCapacity;
