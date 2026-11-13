@@ -35,12 +35,7 @@ ChatGPT and Claude are development tools used on this project; their creators do
 
 ## A personal note from Vinny
 
-<!--
-Vinny: this section is yours to write. Put the reason you're doing this in your own words.
-You could talk about why you wanted to continue the Xbox 360 port, what these games or
-the console mean to you, what you hope to achieve, and how you feel about using AI tools.
-No need to apologize for using them; just be honest about your process and intentions.
--->
+**TO BE WRITTEN**
 
 ## Credits and project origins
 
