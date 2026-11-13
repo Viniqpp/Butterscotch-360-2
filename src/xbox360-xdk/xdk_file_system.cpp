@@ -34,6 +34,7 @@ static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
 
 static bool xdkGetFileSize(HANDLE file, DWORD* outSize) {
     DWORD high = 0;
+    SetLastError(NO_ERROR);
     DWORD low = GetFileSize(file, &high);
     if (low == INVALID_FILE_SIZE && GetLastError() != NO_ERROR) return false;
     if (high != 0) return false; // The engine's binary API is int32-sized.
