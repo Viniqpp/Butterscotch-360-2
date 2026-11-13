@@ -27,8 +27,10 @@ extern "C" ULONG __cdecl DbgPrint(const char* format, ...);
 // ===[ POSIX clock polyfill implementation ]===
 double _xdk_monotonic_ms(void) {
     LARGE_INTEGER freq, counter;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&counter);
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 ||
+        !QueryPerformanceCounter(&counter)) {
+        return (double)GetTickCount();
+    }
     return (double)counter.QuadPart / (double)freq.QuadPart * 1000.0;
 }
 
@@ -146,7 +148,7 @@ VOID __cdecl main() {
 
     if (!dataWinPath) {
         DbgPrint("BS: FATAL: data.win not found\n");
-        for (;;) { } // hang instead of crash for debugging
+        return;
     }
 
     DbgPrint("BS: parsing data.win\n");
@@ -166,7 +168,7 @@ VOID __cdecl main() {
 
     if (!dataWin) {
         DbgPrint("BS: FATAL: DataWin_parse returned NULL\n");
-        for (;;) { }
+        return;
     }
     DbgPrint("BS: data.win parsed OK\n");
 
@@ -228,8 +230,26 @@ VOID __cdecl main() {
     XdkAudioSystem* xdkAudio = XdkAudioSystem_create();
     AudioSystem* audioSystem = (AudioSystem*)xdkAudio;
 
+    if (!xdkFs || !renderer || !vm || !xdkAudio) {
+        DbgPrint("BS: FATAL: subsystem allocation failed (fs=%d renderer=%d vm=%d audio=%d)\n",
+                 xdkFs != NULL, renderer != NULL, vm != NULL, xdkAudio != NULL);
+        return;
+    }
+
     DbgPrint("BS: creating modern runner\n");
     Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, 0);
+    if (!runner) {
+        DbgPrint("BS: FATAL: Runner_create returned NULL\n");
+        return;
+    }
+    if (!((D3D9Renderer*)renderer)->initialized) {
+        DbgPrint("BS: FATAL: D3D9 renderer initialization failed\n");
+        return;
+    }
+    if (!xdkAudio->initialized) {
+        DbgPrint("BS: FATAL: XAudio2 initialization failed\n");
+        return;
+    }
 
     // Parse CONFIG.JSN options
     if (configRoot) {
@@ -276,12 +296,18 @@ VOID __cdecl main() {
     DbgPrint("BS: entering modern main loop\\n");
 
     LARGE_INTEGER freq, lastTime, currentTime;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&lastTime);
+    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 ||
+        !QueryPerformanceCounter(&lastTime)) {
+        DbgPrint("BS: FATAL: performance counter unavailable\n");
+        return;
+    }
     double accumulator = 0.0;
 
     while (!runner->shouldExit) {
-        QueryPerformanceCounter(&currentTime);
+        if (!QueryPerformanceCounter(&currentTime)) {
+            DbgPrint("BS: performance counter query failed; stopping main loop\n");
+            break;
+        }
         double deltaTime = (double)(currentTime.QuadPart - lastTime.QuadPart) / (double)freq.QuadPart;
         lastTime = currentTime;
         if (deltaTime < 0.0) deltaTime = 0.0;
