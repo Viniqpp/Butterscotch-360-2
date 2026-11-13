@@ -255,3 +255,297 @@ No confirmed binary-open mode inversion or seek-origin bug was found. `GML_FILE_
 - [Fork XDK audio implementation](https://github.com/Viniqpp/Butterscotch-360-2/blob/5ac4091448877fc1ce738f69d77b0c64df956925/src/xbox360-xdk/xaudio2_audio.cpp)
 - [Fork XDK filesystem implementation](https://github.com/Viniqpp/Butterscotch-360-2/blob/5ac4091448877fc1ce738f69d77b0c64df956925/src/xbox360-xdk/xdk_file_system.cpp)
 - [Fork project build source list](https://github.com/Viniqpp/Butterscotch-360-2/blob/5ac4091448877fc1ce738f69d77b0c64df956925/Butterscotch360.vcxproj)
+
+
+---
+
+# SECOND RESEARCH PASS — Deeper audio and filesystem revalidation
+
+**Research date:** 2026-11-13  
+**Scope:** AudioSystem and FileSystem only; renderer findings remain in the separate renderer audit.  
+**Method:** Static source and Git-object inspection only. No XDK compilation, XEX generation, emulator/console run, audio playback, filesystem integration test, or fault injection was performed.
+
+## Exact revisions inspected
+
+| Repository | Ref / commit |
+|---|---|
+| Fork | `Viniqpp/Butterscotch-360-2`, `refresh2/modern-upstream-migration`, **`ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971`** |
+| Fork source snapshot parent | **`d61018a1e326e1b0034f9dd3879677aa36523abe`** |
+| Modern upstream | `ButterscotchRunner/Butterscotch`, `main`, **`0c94bfb05e3cb4b8946a38f8085747035dd37f94`** |
+| Original port reference | `ceilingtilefan/Butterscotch-360`, **`1fd7659a4b95e0ce9837c3162de976cfc9ceec5a`** |
+
+The current branch HEAD `ddddd4e...` changes only `docs/research/INDEPENDENT_CODE_REVIEW.md`; its parent `d61018a...` changes only `docs/research/XDK_BUILD_ENVIRONMENT.md`. The source snapshots below are therefore unchanged at the inspected HEAD. The pre-edit report blob was `1acc0006e1117cd7204fbabf52a83c0435af5d09`; that full report was fetched and preserved as the base of this append.
+
+### Fork source blob SHAs
+
+| Path | Blob SHA |
+|---|---|
+| `src/xbox360-xdk/xaudio2_audio.cpp` | `84bb2863b60b37507f9898c1597115f1ac13da09` |
+| `src/xbox360-xdk/xdk_file_system.cpp` | `04d03335ca8bec185b89c6ce5d97c7c0341685c3` |
+| `src/audio_system.h` | `f4e5e998dd558d81493b76c9c2cbaa268da7ea08` |
+| `src/file_system.h` | `b4e8c28f09cf9a8ab10565778c105ed83d300ec2` |
+| `src/data_win.c` | `26d1533e8275b8809f83f425be0919496c161d21` |
+| `Butterscotch360.vcxproj` | `2fc2bb5bc081339d02d0156f8829310d0fdfed7d` |
+
+Upstream interface headers are byte-identical to the fork headers at these snapshots. Upstream implementation blobs: `src/audio/miniaudio/ma_audio_system.c` = `63d53f803cda96b9af27ec2229dfb8a185213c90`; `src/overlay_file_system.c` = `0e3d9aed63964549fe406c6f73326b466e27381a`.
+
+## 1. Revalidation of first-pass findings
+
+| First-pass finding | Current status | Second-pass conclusion |
+|---|---|---|
+| A-01 WAV RIFF chunk out-of-bounds read | **Original defect fixed; residual hardening gap** | Current parser adds RIFF/chunk/data bounds checks. Malformed chunk handling should still fail closed instead of silently breaking and accepting partial parse state. |
+| A-02 unchecked external reads and PCM allocations | **Fixed** | Current source checks external open/seek/size/read and WAV/OGG allocations, including short external reads. |
+| A-03 failed groups reported loaded | **Fixed** | Sparse group slots use NULL; `groupIsLoaded` requires a non-NULL parsed DataWin; failed loads remain retryable. |
+| A-04 group fades never advance | **Fixed** | `xdkAudioUpdate` now advances group gain state and reapplies volume to active voices. |
+| A-05 SOND pitch and sound-index controls | **Partially fixed** | Initial SOND pitch is copied and setters update all active matching instances. XAudio2 `SetFrequencyRatio` return/range handling remains weak. |
+| A-06 sound length only while active | **Confirmed** | `xdkGetSoundLength` returns 0 for a valid SOND with no active instance. |
+| A-07 seek no-op / loop position | **Confirmed** | `xdkSetTrackPosition` remains a TODO; getter is instance-ID-only and reports cumulative SamplesPlayed, not loop-relative cursor. |
+| A-08 spatial audio/listener gain ignored | **Confirmed** | Spatial args are discarded; listener gain is collapsed to global master gain. Listener position is stored but not used for spatial routing. |
+| A-09 streams/encoded playback stubs | **Confirmed** | Stream creation/destruction and encoded playback still fail unconditionally. |
+| A-10 lazy vtable initialization race | **Hypothesis** | Plain static booleans guard lazy vtable writes; concurrent first construction is not established by source alone. |
+| F-01 rewrite ignores failures | **Fixed** | Current code checks seek/truncate failures and logs them; the void interface still cannot report structured failure to callers. |
+| R-01 path base normalization/truncation | **Confirmed** | Only relative suffix separators are normalized; base path can remain mixed; fixed 512-byte path storage silently truncates. |
+| R-02 same-handle concurrency | **Hypothesis / contract gap** | No serialization exists; impact depends on VM handle-threading guarantees. |
+| R-03 legacy libxenon vtables incomplete | **Confirmed, not active in current XDK project** | Legacy backend remains incomplete, but the Visual Studio project selects XDK backend. |
+
+### A-01 follow-up — malformed WAV chunks should fail closed
+
+**Classification:** Confirmed hardening gap; the original out-of-bounds-copy defect is fixed.  
+**Location:** `src/xbox360-xdk/xaudio2_audio.cpp`, `xdkPlaySound()`, RIFF parser.
+
+The parser now has bounds checks, but invalid chunk headers/payloads or undersized `fmt ` chunks should be distinguished from normal end-of-list. Do not continue with previously discovered format/data values after a malformed chunk.
+
+**Correction:** Return an explicit parse status and validated PCM view. Reject malformed chunk structure, invalid padding, inconsistent RIFF/input sizes, unsupported encodings and conflicting format metadata. Retain subtraction-based bounds checks.
+
+**Tests:** Valid PCM with odd-sized padded ancillary chunks; data-before-fmt; truncated header; undersized fmt; payload beyond RIFF; RIFF size beyond input; malformed trailing chunk after valid chunks.
+
+### A-05 follow-up — pitch application needs validation and HRESULT handling
+
+**Classification:** Confirmed missing error handling; exact audible impact requires target testing.  
+**Location:** `xdkPlaySound()`, `xdkSetSoundPitch()`, `src/xbox360-xdk/xaudio2_audio.cpp`.
+
+The adapter calls `SetFrequencyRatio` but does not check the HRESULT or validate finite positive values against the actual supported XAudio2 ratio range. Stored pitch can therefore diverge from the effective voice setting.
+
+**Correction:** Validate finite positive pitch, clamp/reject according to the targeted XDK's voice limits, check HRESULT, and keep stored/effective pitch consistent.
+
+**Tests:** Default, lower/upper supported bounds, out-of-range, zero, negative, NaN and infinity; compare reported pitch with effective voice ratio.
+
+## 2. New confirmed audio findings
+
+### A-11 — successful playback destroys its voice before returning
+
+**Severity:** Critical — normal playback cannot remain active.  
+**Location:** `src/xbox360-xdk/xaudio2_audio.cpp`, `xdkPlaySound()`, immediately after successful `IXAudio2SourceVoice::Start()`, approximately lines 480–495.  
+[Source](https://github.com/Viniqpp/Butterscotch-360-2/blob/ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971/src/xbox360-xdk/xaudio2_audio.cpp#L470-L500)
+
+After decode, voice creation, buffer submission and Start all succeed, the function unconditionally calls `destroyInstance(inst)` and returns -1. That helper stops/flushes/destroys the voice, frees PCM and marks the slot inactive. The successful voice is therefore torn down before the caller can use an instance ID.
+
+**Correction:** Remove success-path destruction and return `inst->instanceId`. Keep cleanup on failure and natural completion/explicit stop. PCM remains instance-owned until the voice has stopped and been destroyed.
+
+**Tests:** Play embedded OGG and PCM WAV; require nonnegative ID, active state after return and queued buffer retention. Verify PCM survives until completion/stop and the slot is reclaimed afterward.
+
+### A-12 — instance IDs are derived from reusable slot indices
+
+**Severity:** High — stale handles can control an unrelated later sound.  
+**Location:** `findFreeSlot()`, `findById()`, instance initialization in `xdkPlaySound()`, `src/xbox360-xdk/xaudio2_audio.cpp`.
+
+IDs are computed from `XDK_SOUND_INSTANCE_ID_BASE + slotIndex`; `nextInstanceCounter` does not participate. Once a slot is freed and reused, its ID is reused too. Old script-held IDs may stop, pause or modify a new sound in that slot.
+
+**Correction:** Assign monotonic IDs from the counter, store each ID in its slot, and compare it in lookup. Define wraparound while skipping reserved ranges and active IDs; reserve a disjoint range for future stream IDs.
+
+**Tests:** Play/stop a sound, reuse its slot, then issue stop/pause/gain using the old ID. The new voice must be unaffected. Add reduced-width counter wraparound tests.
+
+### A-13 — valid sound length cannot be queried before playback
+
+**Severity:** Medium — incorrect GameMaker-facing metadata.  
+**Location:** `xdkGetSoundLength()`, `src/xbox360-xdk/xaudio2_audio.cpp`, approximately lines 787–803.  
+[Source](https://github.com/Viniqpp/Butterscotch-360-2/blob/ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971/src/xbox360-xdk/xaudio2_audio.cpp#L780-L810) · [Upstream](https://github.com/ButterscotchRunner/Butterscotch/blob/0c94bfb05e3cb4b8946a38f8085747035dd37f94/src/audio/miniaudio/ma_audio_system.c)
+
+Duration is derived only from an active instance's PCM. A valid SOND with no active instance returns 0, unlike upstream's temporary decoder query.
+
+**Correction:** Resolve SOND/group/AUDO or external source, open a temporary decoder, query frames/sample rate, and close/free on every path. Cache by immutable asset identity if needed.
+
+**Tests:** Query embedded/external duration before play, during play, after natural completion and after stop; invalid indices return 0.
+
+### A-14 — track-position getter omits SOND lookup and loop-relative cursor
+
+**Severity:** Medium — incomplete API parity.  
+**Location:** `xdkGetTrackPosition()`, `src/xbox360-xdk/xaudio2_audio.cpp`, approximately lines 675–693.  
+[Source](https://github.com/Viniqpp/Butterscotch-360-2/blob/ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971/src/xbox360-xdk/xaudio2_audio.cpp#L660-L700) · [Upstream](https://github.com/ButterscotchRunner/Butterscotch/blob/0c94bfb05e3cb4b8946a38f8085747035dd37f94/src/audio/miniaudio/ma_audio_system.c)
+
+The getter only resolves instance IDs. A SOND index returns 0 even with an active matching instance. Looping playback reports cumulative SamplesPlayed/sampleRate, not position within one iteration.
+
+**Correction:** Match upstream ID-vs-SOND discrimination. Define elapsed-time vs track-cursor semantics; if cursor, normalize only looping instances using decoded frame count and loop behavior.
+
+**Tests:** Query by ID and SOND; test non-looping and multiple loop iterations, inactive and invalid values.
+
+### A-16 — DataWin parser can terminate the process on recoverable group-load errors
+
+**Severity:** Critical — missing/unreadable/malformed group file can exit the game.  
+**Location:** `xdkGroupLoad()`, `src/xbox360-xdk/xaudio2_audio.cpp`; `DataWin_parse()`, `src/data_win.c`, approximately lines 3056–3076.  
+[Group loader](https://github.com/Viniqpp/Butterscotch-360-2/blob/ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971/src/xbox360-xdk/xaudio2_audio.cpp#L720-L770) · [Parser](https://github.com/Viniqpp/Butterscotch-360-2/blob/ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971/src/data_win.c#L3050-L3085)
+
+The group loader checks existence and handles a NULL parse result, but `DataWin_parse()` calls `exit(1)` when `fopen` fails or file size is invalid. A race between existence check/open, unreadable storage, empty or corrupt group file can terminate the process. The caller's NULL check cannot catch process exit.
+
+**Correction:** Make input-driven parse errors return NULL or structured errors after closing/freeing partial state. Audit all parser-reachable `exit(1)` calls. Preserve the group's NULL/unloaded state on failure so retry remains possible.
+
+**Tests:** Delete file between exists/open; empty, truncated and malformed group files; process must survive, group remains unloaded, and a valid replacement loads successfully.
+
+## 3. New confirmed filesystem findings
+
+### F-02 — binary tell narrows an unsigned OS cursor to signed 32-bit
+
+**Severity:** Medium — large valid cursor can become negative/wrapped.  
+**Location:** `xdkBinaryTell()`, `src/xbox360-xdk/xdk_file_system.cpp`, approximately lines 240–246.  
+[Source](https://github.com/Viniqpp/Butterscotch-360-2/blob/ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971/src/xbox360-xdk/xdk_file_system.cpp#L230-L255)
+
+The OS cursor is returned as DWORD then cast to `int32_t`. Values above INT32_MAX are not representable and can wrap. The size helper already rejects sizes outside the signed interface range.
+
+**Correction:** Return -1 when cursor exceeds INT32_MAX; widen the shared interface consistently if larger files are required.
+
+**Tests:** Seek/tell around INT32_MAX using sparse files where supported; no wrapped negative cursor may be reported as valid.
+
+### F-03 — text read can overflow size-plus-terminator allocation
+
+**Severity:** Medium / low-likelihood robustness issue.  
+**Location:** `xdkReadFileText()` and `xdkGetFileSize()`, `src/xbox360-xdk/xdk_file_system.cpp`, approximately lines 33–101.  
+[Source](https://github.com/Viniqpp/Butterscotch-360-2/blob/ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971/src/xbox360-xdk/xdk_file_system.cpp#L25-L110)
+
+The size helper rejects nonzero high DWORDs but accepts low DWORD 0xffffffff. `(size_t)size + 1` wraps on a 32-bit target, so the subsequent read can write into an undersized allocation.
+
+**Correction:** Reject text sizes above the signed engine limit before adding the NUL byte; use checked addition and consistent bounds across whole-file APIs.
+
+**Tests:** Unit-test size validation at 0, INT32_MAX, INT32_MAX+1 and UINT32_MAX without allocating those buffers.
+
+### F-04 — directory enumeration silently returns partial results after allocation failure
+
+**Severity:** Low/Medium — missing assets can look like a complete listing.  
+**Location:** `xdkListDirectory()`, `src/xbox360-xdk/xdk_file_system.cpp`, approximately lines 294–328.  
+[Source](https://github.com/Viniqpp/Butterscotch-360-2/blob/ddddd4ebb1e65afdc4c675f3d6d628a3e2dae971/src/xbox360-xdk/xdk_file_system.cpp#L285-L335)
+
+If allocating one entry name fails, the implementation skips it and continues. The returned array gives no indication it is incomplete. It also does not inspect the final GetLastError after FindNextFileA stops.
+
+**Correction:** On allocation failure, free all accumulated names, free the array, close the search handle and return NULL. Inspect terminal enumeration error rather than treating every stop as normal EOF.
+
+**Tests:** Inject failure on Nth name allocation; require NULL and no leaked names/array/search handle. Test normal empty/populated directories.
+
+## 4. Risks and unresolved contracts
+
+### R-04 — lazy AUDO reads share a mutable FILE cursor and failed reads are not retryable
+
+**Classification:** Missing error checks confirmed; concurrency impact remains a hypothesis.  
+**Location:** `DataWin_loadAudoIfNeeded()`, `src/data_win.c`, approximately lines 3029–3050; called by `xdkPlaySound()`.
+
+The helper does not check ftell/fseek results. A short read is logged but leaves a zero-initialized, non-NULL data pointer, so subsequent calls treat failed data as loaded. Concurrent loads can interleave seeks/reads on the same FILE cursor; whether normal engine calls can race depends on the threading contract.
+
+**Correction:** Return success/failure; check all cursor/read calls; free partial buffer and leave entry->data NULL on failure. Enforce main-thread-only loading or protect the shared FILE cursor with a per-DataWin lock.
+
+**Tests:** Inject seek/short-read failure and retry; concurrently load distinct AUDO entries and compare bytes to source.
+
+### R-05 — external audio bypasses the FileSystem read API
+
+**Classification:** Hypothesis / platform integration risk.  
+**Location:** External-file branch of `xdkPlaySound()`, `src/xbox360-xdk/xaudio2_audio.cpp`.
+
+The path is resolved through FileSystem but opened with CRT fopen, while the XDK filesystem uses CreateFileA. Source review does not prove CRT fopen accepts every device/mount path accepted by the XDK filesystem.
+
+**Correction:** Prefer FileSystem.readFileBinary or add streaming-open/read to FileSystem. If CRT access is intentional, document and verify on target.
+
+**Tests:** Play external OGG from game device and secondary mounted device; compare with FileSystem binary read.
+
+### R-06 — vtable and audio state concurrency is not encoded
+
+**Classification:** Hypothesis / concurrency risk.  
+**Location:** `xdkInitializeAudioVtable()`, `XdkFileSystem_create()`, audio instance/group state.
+
+Static booleans guard lazy vtable writes; audio instance/group arrays are also mutated without explicit locks. This may be acceptable if the engine guarantees single-thread ownership, but source does not assert that contract.
+
+**Correction:** Document thread affinity. If concurrent use is allowed, use one-time vtable initialization and synchronize instance/group state. Avoid holding global locks during blocking I/O/decode.
+
+**Tests:** Concurrent first construction and concurrent play/stop/group-load/gain operations under a race-enabled host harness if separable from XDK headers.
+
+### R-07 — path normalization and base-path truncation
+
+**Classification:** Confirmed path-handling defect; target impact needs XDK verification.  
+**Location:** `xdkResolvePath()`, `XdkFileSystem_create()`, `src/xbox360-xdk/xdk_file_system.cpp`, approximately lines 10–30 and 331–375.
+
+Only relative suffix separators are normalized; the base prefix may retain mixed slash styles. The 512-byte base buffer silently truncates long paths. The absolute-path test also treats any colon as absolute.
+
+**Correction:** Reject overlong paths; normalize the entire joined path; recognize only explicit drive/device roots appropriate to XDK. Decide and document whether relative `..` traversal is permitted.
+
+**Tests:** Both slash styles, drive/device roots, colon in relative filename, empty/trailing separators, buffer boundary, traversal and case variants.
+
+### R-08 — case sensitivity is delegated to the target volume
+
+**Classification:** Hypothesis / compatibility requirement.  
+**Location:** `xdkResolvePath()`, `xdkFileExists()`, CreateFileA and directory operations.
+
+The adapter does not case-fold. Actual case behavior depends on target filesystem and mounted volume; source alone cannot establish all media behavior.
+
+**Correction:** Do not lowercase blindly. Compare target behavior with upstream overlay and real game asset paths; add a fallback only if target tests prove it necessary.
+
+**Tests:** Mixed-case stored filename accessed with exact, uppercase and lowercase variants on each supported volume.
+
+## 5. Ownership, WAD/AUDO and cleanup
+
+- Main DataWin is caller-owned and stored at group index 0; audio destroy must not free it.
+- Successfully parsed nonzero group DataWin objects are audio-system-owned and must be freed on destroy. NULL sparse slots mean unloaded/failed and should remain retryable.
+- DataWin owns lazily loaded AUDO buffers; each audio instance owns its separately decoded PCM. PCM must remain alive until the XAudio2 voice is stopped/destroyed.
+- `destroyInstance()` has the correct internal teardown order (stop/flush/destroy voice, then free PCM), but A-11 calls it on successful Start and defeats the intended lifetime.
+- `DataWin_parse()` process-exit paths prevent ordinary group-load recovery; changing them requires auditing partial nested allocations and cleanup.
+- Lazy AUDO short-read failure currently leaves a non-NULL buffer and blocks retry.
+- XAudio2's internal audio thread does not make the adapter's instance/group structures thread-safe.
+
+## 6. Filesystem contract review
+
+The current FileSystem interface has 20 slots and the XDK initializer assigns all 20 by named assignments. Source inspection found no binary open-mode inversion or incorrect absolute seek origin.
+
+| Operation | Current semantics | Assessment |
+|---|---|---|
+| Whole-file text/binary read | Existing file; exact-read loop; NULL on read/allocation failure | Basic behavior sound; F-03 size edge |
+| Whole-file write | Create/truncate; exact-write loop; checks zero progress | Basic behavior sound |
+| Binary READ | OPEN_EXISTING | Correct |
+| Binary WRITE | CREATE_ALWAYS, truncates | Correct |
+| Binary READWRITE | OPEN_ALWAYS, preserves existing bytes | Correct |
+| Binary read/write | Actual byte count; EOF/zero request 0; OS error -1 | Callers must handle short transfers |
+| Tell/seek/size | OS cursor APIs; signed 32-bit interface | F-02 boundary |
+| Rewrite | Seek zero then truncate; current code checks errors | F-01 fixed; interface remains void |
+| Directory listing | Allocated names plus stb_ds array | F-04 partial-list behavior |
+| Rename/delete/directories | XDK/Win32 APIs | Verify overwrite/cross-volume/nested behavior on target |
+
+Check every directory-list caller frees each name and the array with the expected allocator. No mismatch was confirmed in this pass, but it is a useful leak test.
+
+## 7. Implementation priority
+
+1. **P0:** Fix A-11: return the live instance ID and retain the successful voice/PCM.
+2. **P0:** Fix A-16: make input-driven DataWin parser failures recoverable and clean partial state.
+3. **P1:** Fix A-12 with monotonic IDs and defined wraparound.
+4. **P1:** Fix R-04 lazy AUDO failure/retry and establish threading policy.
+5. **P1:** Implement A-13/A-14 metadata and track-position parity.
+6. **P1:** Harden F-02/F-03/F-04/R-07 integer, allocation, enumeration and path boundaries.
+7. **P2:** Explicitly define capability behavior for streaming, encoded playback, 3D spatial audio and listener gain.
+8. **P2:** Verify case sensitivity and concurrency contracts on target.
+
+## 8. Regression test plan
+
+- Playback lifecycle: embedded OGG/WAV, nonnegative ID, active voice after return, natural completion cleanup, stop during playback, no premature PCM free.
+- Instance IDs: slot reuse must not let stale IDs control new voices; test wraparound/reserved ranges.
+- Decoder/parser: reordered/padded WAV chunks, malformed RIFF, truncated OGG, allocation failures, invalid sample rate/channel count.
+- Groups: valid/missing/empty/malformed/restored group; process survives, failed load is retryable.
+- Gain/pitch: SOND pitch, multi-instance sound-index controls, per-instance controls, timed group fades, out-of-range frequency ratios.
+- Metadata/timeline: duration before/after playback, position by instance and SOND, looping cursor, seek boundaries/invalid values.
+- AUDO lazy loading: short read, seek failure, retry, concurrent distinct entries, correct shutdown ownership.
+- Binary I/O: all open modes, partial transfers, EOF, invalid handle, negative counts, tell/seek/size limits, rewrite failure.
+- Text/list: maximum accepted size, terminator overflow, allocation failure during enumeration, terminal enumeration errors, caller frees.
+- Paths/case: slash styles, path buffer limit, drive/device roots, traversal policy, case variants and mounted devices.
+- Concurrency: concurrent construction and shared audio/filesystem state if supported by the engine contract.
+
+## 9. Confidence and limits
+
+**Confirmed from current source:** successful Start is followed by unconditional instance destruction; IDs are slot-derived/reused; duration and track-position lookup are incomplete; seek/spatial/listener/stream/encoded operations are incomplete; DataWin parser has process-exit paths; lazy AUDO loading lacks seek/tell checks and preserves failed buffers; binary tell narrows to signed 32-bit; text size-plus-terminator can overflow; directory enumeration can silently omit entries; path normalization/truncation behavior.
+
+**Hypotheses / require target or runtime-contract evidence:** concurrent lazy AUDO reads occur in normal operation; same-handle calls are concurrent; CRT fopen fails for supported Xbox device paths; actual case behavior on every volume; exact XAudio2 pitch bounds; memory pressure on representative game workloads.
+
+**Fixed in current snapshot:** original WAV out-of-bounds copy, unchecked external read/PCM allocation paths, group false-success state, missing group-gain update, most sound-index pitch/gain gaps, and unchecked binary rewrite operations. Do not report these as still-present without evidence of regression.
+
+**Not performed:** no build, compilation, XEX generation, emulator/console execution, audio playback, filesystem runtime test, profiler measurement or fault injection. This is a static audit, not a compatibility certification.
