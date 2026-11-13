@@ -233,7 +233,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
 
     if (inAudo) {
         if (sound->audioFile < 0 || (uint32_t)sound->audioFile >= audioData->audo.count) {
-            DbgPrint("BS: bad audioFile idx %d (audo count=%d)\n", sound->audioFile, (int)dw->audo.count);
+            DbgPrint("BS: bad audioFile idx %d (audo count=%d)\n", sound->audioFile, (int)audioData->audo.count);
             return inst->instanceId;
         }
         DataWin_loadAudoIfNeeded(audioData, (uint32_t)sound->audioFile);
