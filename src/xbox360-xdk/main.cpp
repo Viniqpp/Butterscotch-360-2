@@ -162,6 +162,30 @@ static void platformSwapBuffers(IDirect3DDevice9* device) {
     }
 }
 
+static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
+                        XdkAudioSystem* xdkAudio, DataWin* dataWin,
+                        XdkFileSystem* xdkFs, JsonValue* configRoot,
+                        IDirect3DDevice9* device, IDirect3D9* d3d) {
+    // Runner_free closes outstanding FileSystem handles and resets the VM,
+    // so its dependencies must remain alive until it has completed.
+    if (runner) Runner_free(runner);
+
+    if (xdkAudio && xdkAudio->base.vtable && xdkAudio->base.vtable->destroy)
+        xdkAudio->base.vtable->destroy((AudioSystem*)xdkAudio);
+    if (renderer && renderer->vtable && renderer->vtable->destroy)
+        renderer->vtable->destroy(renderer);
+    if (vm) VM_free(vm);
+    if (dataWin) DataWin_free(dataWin);
+    if (configRoot) JsonReader_free(configRoot);
+    free(xdkFs);
+
+    if (device) device->Release();
+    if (d3d) d3d->Release();
+    free(xpadMappings);
+    xpadMappings = NULL;
+    xpadMappingCount = 0;
+}
+
 // ===[ Main Entry Point ]===
 
 VOID __cdecl main() {
@@ -190,6 +214,7 @@ VOID __cdecl main() {
                                     &d3dpp, &pd3dDevice);
     if (FAILED(hr)) {
         DbgPrint("BS: FATAL: CreateDevice failed\n");
+        shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, pD3D);
         return;
     }
     DbgPrint("BS: D3D device created\n");
@@ -225,6 +250,7 @@ VOID __cdecl main() {
 
     if (!dataWinPath) {
         DbgPrint("BS: FATAL: data.win not found\n");
+        shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
     }
 
@@ -245,6 +271,7 @@ VOID __cdecl main() {
 
     if (!dataWin) {
         DbgPrint("BS: FATAL: DataWin_parse returned NULL\n");
+        shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
     }
     DbgPrint("BS: data.win parsed OK\n");
@@ -310,6 +337,7 @@ VOID __cdecl main() {
     if (!xdkFs || !renderer || !vm || !xdkAudio) {
         DbgPrint("BS: FATAL: subsystem allocation failed (fs=%d renderer=%d vm=%d audio=%d)\n",
                  xdkFs != NULL, renderer != NULL, vm != NULL, xdkAudio != NULL);
+        shutdownXdk(NULL, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
 
@@ -317,14 +345,17 @@ VOID __cdecl main() {
     Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, 0);
     if (!runner) {
         DbgPrint("BS: FATAL: Runner_create returned NULL\n");
+        shutdownXdk(NULL, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
     if (!((D3D9Renderer*)renderer)->initialized) {
         DbgPrint("BS: FATAL: D3D9 renderer initialization failed\n");
+        shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
     if (!xdkAudio->initialized) {
         DbgPrint("BS: FATAL: XAudio2 initialization failed\n");
+        shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
 
@@ -376,6 +407,7 @@ VOID __cdecl main() {
     if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 ||
         !QueryPerformanceCounter(&lastTime)) {
         DbgPrint("BS: FATAL: performance counter unavailable\n");
+        shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
     double accumulator = 0.0;
@@ -483,17 +515,5 @@ VOID __cdecl main() {
 
     // ===[ Cleanup ]===
     DbgPrint("BS: shutting down runner\\n");
-    if (runner && runner->audioSystem) {
-        runner->audioSystem->vtable->destroy(runner->audioSystem);
-        runner->audioSystem = NULL;
-    }
-    if (renderer) renderer->vtable->destroy(renderer);
-    Runner_free(runner);
-    VM_free(vm);
-    DataWin_free(dataWin);
-    free(xdkFs);
-
-    if (pd3dDevice) pd3dDevice->Release();
-    if (pD3D) pD3D->Release();
-    free(xpadMappings);
+    shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
 }
