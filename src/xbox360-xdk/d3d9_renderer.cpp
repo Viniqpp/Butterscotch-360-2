@@ -419,14 +419,38 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     dev->SetVertexDeclaration((IDirect3DVertexDeclaration9*)dr->pVertexDecl);
 
 
-    // Alpha blending
+    // Reset per-frame GPU state so the getters and actual device state agree
+    // even when the previous frame ended with custom blend/alpha/color masks.
+    dr->blendMode = bm_normal;
+    renderer->blendFactors.src = bm_src_alpha;
+    renderer->blendFactors.dst = bm_inv_src_alpha;
+    renderer->blendFactors.srcAlpha = bm_src_alpha;
+    renderer->blendFactors.dstAlpha = bm_inv_src_alpha;
+
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    dev->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+    dev->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    dev->SetRenderState(D3DRS_BLENDOPALPHA, D3DBLENDOP_ADD);
     dev->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
     dev->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    dev->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    dev->SetRenderState(D3DRS_ALPHAREF, 0);
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE,
+        D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+        D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
 
     // No depth testing for 2D
     dev->SetRenderState(D3DRS_ZENABLE, FALSE);
     dev->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+
+    D3DVIEWPORT9 vp;
+    vp.X = 0;
+    vp.Y = 0;
+    vp.Width = (DWORD)windowW;
+    vp.Height = (DWORD)windowH;
+    vp.MinZ = 0.0f;
+    vp.MaxZ = 1.0f;
+    dev->SetViewport(&vp);
 
     // Disable viewport transform — we use pre-transformed screen-space vertices
     dev->SetRenderState(D3DRS_VIEWPORTENABLE, FALSE);
