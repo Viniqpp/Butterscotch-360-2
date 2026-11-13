@@ -242,25 +242,31 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         if (SUCCEEDED(textureHr) && linearTex) {
             D3DLOCKED_RECT lr;
             textureHr = linearTex->LockRect(0, &lr, NULL, 0);
-            if (SUCCEEDED(textureHr) && lr.pBits && lr.Pitch >= w * 4) {
-                for (int y2 = 0; y2 < h; y2++) {
-                    uint8_t* src = pixels + y2 * w * 4;
-                    DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + y2 * lr.Pitch);
-                    for (int x2 = 0; x2 < w; x2++) {
-                        uint8_t r = src[x2 * 4 + 0];
-                        uint8_t g = src[x2 * 4 + 1];
-                        uint8_t b = src[x2 * 4 + 2];
-                        uint8_t a = src[x2 * 4 + 3];
-                        if (a == 0) { r = 0; g = 0; b = 0; }
-                        dst[x2] = D3DCOLOR_ARGB(a, r, g, b);
-                    }
-                }
-                textureHr = linearTex->UnlockRect(0);
-                if (SUCCEEDED(textureHr)) {
-                    tex = linearTex;
-                    dr->textures[i] = tex;
-                } else {
+            if (SUCCEEDED(textureHr) && lr.pBits) {
+                if (lr.Pitch < w * 4) {
+                    textureHr = E_FAIL;
+                    linearTex->UnlockRect(0);
                     linearTex->Release();
+                } else {
+                    for (int y2 = 0; y2 < h; y2++) {
+                        uint8_t* src = pixels + y2 * w * 4;
+                        DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + y2 * lr.Pitch);
+                        for (int x2 = 0; x2 < w; x2++) {
+                            uint8_t r = src[x2 * 4 + 0];
+                            uint8_t g = src[x2 * 4 + 1];
+                            uint8_t b = src[x2 * 4 + 2];
+                            uint8_t a = src[x2 * 4 + 3];
+                            if (a == 0) { r = 0; g = 0; b = 0; }
+                            dst[x2] = D3DCOLOR_ARGB(a, r, g, b);
+                        }
+                    }
+                    textureHr = linearTex->UnlockRect(0);
+                    if (SUCCEEDED(textureHr)) {
+                        tex = linearTex;
+                        dr->textures[i] = tex;
+                    } else {
+                        linearTex->Release();
+                    }
                 }
             } else {
                 linearTex->Release();
@@ -910,6 +916,8 @@ static void d3d9DrawSurfaceTiled(Renderer* renderer, int32_t surfaceID, float x,
 static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, int32_t st,
                             int32_t sw, int32_t sh, float x, float y, float xs, float ys,
                             float angle, uint32_t color, float alpha) {
+    // The application surface aliases the host framebuffer, so compositing it
+    // back onto itself is intentionally a no-op. Other surface IDs are unsupported.
     (void)renderer; (void)surfaceID; (void)sl; (void)st; (void)sw; (void)sh;
     (void)x; (void)y; (void)xs; (void)ys; (void)angle; (void)color; (void)alpha;
 }
@@ -917,11 +925,32 @@ static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, i
 // Unsupported surface/shader operations fail explicitly instead of dispatching
 // through a mismatched function pointer. These are capability gaps, not success.
 static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h) { (void)r; (void)w; (void)h; return -1; }
-static bool d3d9SurfaceExists(Renderer* r, int32_t id) { (void)r; (void)id; return false; }
-static bool d3d9SetRenderTarget(Renderer* r, int32_t id, bool implicit) { (void)r; (void)id; (void)implicit; return false; }
-static int32_t d3d9EnsureApplicationSurface(Renderer* r, int32_t w, int32_t h) { (void)r; (void)w; (void)h; return -1; }
-static float d3d9GetSurfaceWidth(Renderer* r, int32_t id) { (void)r; (void)id; return 0.0f; }
-static float d3d9GetSurfaceHeight(Renderer* r, int32_t id) { (void)r; (void)id; return 0.0f; }
+static bool d3d9SurfaceExists(Renderer* r, int32_t id) {
+    (void)r;
+    // The application surface is represented by the host framebuffer on this
+    // backend; user-created offscreen surfaces are not implemented.
+    return id == APPLICATION_SURFACE_ID;
+}
+static bool d3d9SetRenderTarget(Renderer* r, int32_t id, bool implicit) {
+    (void)implicit;
+    if (id != APPLICATION_SURFACE_ID && id != RENDER_TARGET_HOST_FRAMEBUFFER) return false;
+    flushBatch((D3D9Renderer*)r);
+    return true;
+}
+static int32_t d3d9EnsureApplicationSurface(Renderer* r, int32_t w, int32_t h) {
+    (void)r;
+    return w > 0 && h > 0 ? APPLICATION_SURFACE_ID : -1;
+}
+static float d3d9GetSurfaceWidth(Renderer* r, int32_t id) {
+    if (id != APPLICATION_SURFACE_ID) return 0.0f;
+    return ((Renderer*)r)->runner ? (float)((Renderer*)r)->runner->applicationWidth
+                                  : (float)((D3D9Renderer*)r)->gameW;
+}
+static float d3d9GetSurfaceHeight(Renderer* r, int32_t id) {
+    if (id != APPLICATION_SURFACE_ID) return 0.0f;
+    return ((Renderer*)r)->runner ? (float)((Renderer*)r)->runner->applicationHeight
+                                  : (float)((D3D9Renderer*)r)->gameH;
+}
 static void d3d9SurfaceResize(Renderer* r, int32_t id, int32_t w, int32_t h) { (void)r; (void)id; (void)w; (void)h; }
 static void d3d9SurfaceFree(Renderer* r, int32_t id) { (void)r; (void)id; }
 static void d3d9SurfaceCopy(Renderer* r, int32_t d, int32_t dx, int32_t dy, int32_t src, int32_t sx, int32_t sy, int32_t w, int32_t h, bool part) {
