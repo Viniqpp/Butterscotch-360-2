@@ -447,10 +447,16 @@ VOID __cdecl main() {
             gameW = runner->applicationWidth > 0 ? runner->applicationWidth : (int32_t)gen8->defaultWindowWidth;
             gameH = runner->applicationHeight > 0 ? runner->applicationHeight : (int32_t)gen8->defaultWindowHeight;
 
-            Runner_drawPre(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
             Runner_beginFrame(runner, gameW, gameH,
                               SCREEN_WIDTH, SCREEN_HEIGHT,
                               SCREEN_WIDTH, SCREEN_HEIGHT);
+            // The XDK backend currently aliases application_surface to the host
+            // framebuffer. Clear it once before Draw Pre, then preserve that
+            // pass when Runner_drawViews performs its normal clear callback.
+            renderer->vtable->clearScreen(renderer,
+                runner->drawBackgroundColor ? runner->backgroundColor : 0, 1.0f);
+            ((D3D9Renderer*)renderer)->skipNextClearScreen = true;
+            Runner_drawPre(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
             Runner_drawViews(runner, gameW, gameH, false);
             renderer->vtable->endFrameInit(renderer);
             Runner_drawPost(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
