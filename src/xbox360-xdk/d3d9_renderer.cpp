@@ -925,8 +925,8 @@ static void d3d9DrawSpriteTiled(Renderer* renderer, int32_t tpagIndex, float ori
     for (int iy = 0; iy < ny; iy++) for (int ix = 0; ix < nx; ix++) {
         float dx = x + (tileX ? ix * stepX : 0.0f);
         float dy = y + (tileY ? iy * stepY : 0.0f);
-        d3d9DrawSpritePart(renderer, tpagIndex, 0, 0, (float)t->sourceWidth, (float)t->sourceHeight,
-                           dx, dy, xs, ys, 0.0f, originX, originY, color, alpha);
+        d3d9DrawSpritePart(renderer, tpagIndex, 0, 0, t->sourceWidth, t->sourceHeight,
+                           dx - originX * xs, dy - originY * ys, xs, ys, color, alpha);
     }
     (void)dr;
 }
