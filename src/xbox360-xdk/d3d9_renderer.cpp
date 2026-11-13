@@ -406,8 +406,12 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
         printedOnce = true;
     }
 
-    dev->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
-    dev->BeginScene();
+    dr->skipNextClearScreen = false;
+    HRESULT sceneHr = dev->BeginScene();
+    if (FAILED(sceneHr)) {
+        DbgPrint("BS: D3D9 BeginScene failed: hr=0x%08X\n", (unsigned)sceneHr);
+        return;
+    }
 
     // Set shared render state
     dev->SetVertexShader((IDirect3DVertexShader9*)dr->pVertexShader);
@@ -1427,7 +1431,12 @@ static void d3d9GpuSetBlendModeExt(Renderer* r, int32_t sf, int32_t df, int32_t 
     r->blendFactors.dstAlpha = dfa;
 }
 static void d3d9ClearScreen(Renderer* r, uint32_t color, float alpha) {
-    flushBatch((D3D9Renderer*)r);
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    if (dr->skipNextClearScreen) {
+        dr->skipNextClearScreen = false;
+        return;
+    }
+    flushBatch(dr);
     float cr, cg, cb, ca;
     bgrToFloatColor(color, alpha, &cr, &cg, &cb, &ca);
     DWORD packed = D3DCOLOR_ARGB((DWORD)(ca * 255.0f), (DWORD)(cr * 255.0f),
