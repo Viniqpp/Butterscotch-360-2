@@ -60,11 +60,34 @@ static XdkSoundInstance* findFreeSlot(XdkAudioSystem* xa) {
 }
 
 static XdkSoundInstance* findById(XdkAudioSystem* xa, int32_t id) {
-    int32_t idx = id - XDK_SOUND_INSTANCE_ID_BASE;
-    if (idx < 0 || idx >= XDK_MAX_SOUND_INSTANCES) return NULL;
-    XdkSoundInstance* inst = &Instances(xa)->instances[idx];
-    if (!inst->active || inst->instanceId != id) return NULL;
-    return inst;
+    if (id < XDK_SOUND_INSTANCE_ID_BASE) return NULL;
+    XdkInstanceArray* arr = Instances(xa);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        XdkSoundInstance* inst = &arr->instances[i];
+        if (inst->active && inst->instanceId == id) return inst;
+    }
+    return NULL;
+}
+
+// Allocate monotonically increasing public IDs rather than deriving them from
+// reusable instance slots. Wrap safely while avoiding IDs held by active voices.
+static int32_t allocateInstanceId(XdkAudioSystem* xa) {
+    const int32_t maxCounter = 0x7fffffff - XDK_SOUND_INSTANCE_ID_BASE;
+    XdkInstanceArray* arr = Instances(xa);
+    for (int attempt = 0; attempt <= XDK_MAX_SOUND_INSTANCES; attempt++) {
+        if (xa->nextInstanceCounter < 0 || xa->nextInstanceCounter >= maxCounter)
+            xa->nextInstanceCounter = 0;
+        int32_t candidate = XDK_SOUND_INSTANCE_ID_BASE + xa->nextInstanceCounter++;
+        bool inUse = false;
+        for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+            if (arr->instances[i].active && arr->instances[i].instanceId == candidate) {
+                inUse = true;
+                break;
+            }
+        }
+        if (!inUse) return candidate;
+    }
+    return -1;
 }
 
 static void destroyInstance(XdkSoundInstance* inst) {
@@ -221,9 +244,11 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     inst->targetGain = 1.0f;
     inst->sondVolume = 1.0f;
 
-    int32_t slotIndex = (int32_t)(inst - Instances(xa)->instances);
-    inst->instanceId = XDK_SOUND_INSTANCE_ID_BASE + slotIndex;
-    xa->nextInstanceCounter++;
+    inst->instanceId = allocateInstanceId(xa);
+    if (inst->instanceId < 0) {
+        inst->active = false;
+        return -1;
+    }
 
     Sound* sound = &dw->sond.sounds[soundIndex];
     DbgPrint("BS: playSound idx=%d name=%s flags=0x%x audioFile=%d\n",
@@ -499,8 +524,9 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         return -1;
     }
 
-    destroyInstance(inst);
-            return -1;
+    // The source voice now owns a reference to pcmData. Keep the instance
+    // active until the voice completes or the caller explicitly stops it.
+    return inst->instanceId;
 }
 
 static void xdkStopSound(AudioSystem* audio, int32_t soundOrInstance) {
