@@ -94,6 +94,7 @@ static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
 static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSystem) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     xa->base.dw = dataWin;
+    arrput(xa->base.audioGroups, dataWin);
     xa->fileSystem = fileSystem;
     xa->masterGain = 1.0f;
 
@@ -120,12 +121,19 @@ static void xdkAudioDestroy(AudioSystem* audio) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
 
+
     if (arr) {
         for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
             if (arr->instances[i].active) destroyInstance(&arr->instances[i]);
         }
         free(arr);
     }
+
+    for (int32_t i = 1; i < (int32_t)arrlen(audio->audioGroups); ++i) {
+        if (audio->audioGroups[i]) DataWin_free(audio->audioGroups[i]);
+    }
+    arrfree(audio->audioGroups);
+    free(audio->groupGains);
 
     if (xa->pMasterVoice) ((IXAudio2MasteringVoice*)xa->pMasterVoice)->DestroyVoice();
     if (xa->pXAudio2) ((IXAudio2*)xa->pXAudio2)->Release();
@@ -563,12 +571,55 @@ static void xdkSetChannelCount(AudioSystem* audio, int32_t count) {
 }
 
 static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
-    (void)audio; (void)groupIndex;
+    if (groupIndex <= 0 || !audio->dw || (uint32_t)groupIndex >= audio->dw->agrp.count) {
+        DbgPrint("BS: requested invalid audio group %d\\n", groupIndex);
+        return;
+    }
+    while (arrlen(audio->audioGroups) <= groupIndex) {
+        int32_t nextIndex = (int32_t)arrlen(audio->audioGroups);
+        if (nextIndex != groupIndex) {
+            DataWin* placeholder = (DataWin*)calloc(1, sizeof(DataWin));
+            arrput(audio->audioGroups, placeholder);
+            continue;
+        }
+
+        AudioGroup* group = &audio->dw->agrp.audioGroups[groupIndex];
+        char defaultPath[64];
+        const char* relativePath = group->path;
+        if (!relativePath || !relativePath[0]) {
+            sprintf(defaultPath, "audiogroup%d.dat", groupIndex);
+            relativePath = defaultPath;
+        }
+
+        FileSystem* fs = ((XdkAudioSystem*)audio)->fileSystem;
+        if (!fs || !fs->vtable->fileExists(fs, relativePath)) {
+            DbgPrint("BS: audio group %d missing: %s\\n", groupIndex, relativePath);
+            DataWin* placeholder = (DataWin*)calloc(1, sizeof(DataWin));
+            arrput(audio->audioGroups, placeholder);
+            break;
+        }
+
+        char* fullPath = fs->vtable->resolvePath(fs, relativePath);
+        if (!fullPath) {
+            DataWin* placeholder = (DataWin*)calloc(1, sizeof(DataWin));
+            arrput(audio->audioGroups, placeholder);
+            break;
+        }
+
+        DataWinParserOptions options;
+        memset(&options, 0, sizeof(options));
+        options.parseAudo = true;
+        options.lazyLoadAudio = audio->dw->lazyLoadAudio;
+        if (audio->dw->mappedFile) options.loadType = DATAWINLOADTYPE_MAP_FILE;
+        DataWin* groupData = DataWin_parse(fullPath, options);
+        free(fullPath);
+        if (!groupData) groupData = (DataWin*)calloc(1, sizeof(DataWin));
+        arrput(audio->audioGroups, groupData);
+    }
 }
 
 static bool xdkGroupIsLoaded(AudioSystem* audio, int32_t groupIndex) {
-    (void)audio; (void)groupIndex;
-    return true;
+    return groupIndex >= 0 && arrlen(audio->audioGroups) > groupIndex;
 }
 
 
@@ -619,6 +670,12 @@ static void xdkSetMasterGainForListener(AudioSystem* audio, float gain, int32_t 
 
 static void xdkSetGroupGain(AudioSystem* audio, int32_t groupIndex, float gain, uint32_t timeMs) {
     AudioSystem_setGroupGain(audio, groupIndex, gain, timeMs);
+    XdkInstanceArray* arr = Instances((XdkAudioSystem*)audio);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        XdkSoundInstance* inst = &arr->instances[i];
+        if (inst->active && AudioSystem_soundGroup(audio, inst->soundIndex) == groupIndex)
+            xdkApplyInstanceVolume(audio, inst);
+    }
 }
 
 static int32_t xdkCreateStream(AudioSystem* audio, const char* filename) {
