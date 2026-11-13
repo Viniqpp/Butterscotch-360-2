@@ -128,6 +128,11 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     if (!dev || !dataWin) return;
     dr->gameW = (int32_t)dataWin->gen8.defaultWindowWidth;
     dr->gameH = (int32_t)dataWin->gen8.defaultWindowHeight;
+    dr->blendMode = bm_normal;
+    renderer->blendFactors.src = bm_src_alpha;
+    renderer->blendFactors.dst = bm_inv_src_alpha;
+    renderer->blendFactors.srcAlpha = bm_src_alpha;
+    renderer->blendFactors.dstAlpha = bm_inv_src_alpha;
 
     // Allocate CPU vertex staging buffer
     dr->vertexData = (uint8_t*)malloc(D3D9_MAX_QUADS * D3D9_VERTS_PER_QUAD * sizeof(SpriteVertex));
@@ -1095,6 +1100,18 @@ static void d3d9ShaderSetUniformI(Renderer* r, int32_t h, int32_t c, int32_t a, 
 static bool d3d9ShaderIsCompiled(Renderer* r, int32_t i) { (void)r; (void)i; return false; }
 static bool d3d9ShadersSupported(void) { return false; }
 
+static BlendFactors d3d9GpuGetBlendFactors(Renderer* r) {
+    return r->blendFactors;
+}
+static int32_t d3d9GpuGetBlendMode(Renderer* r) {
+    return ((D3D9Renderer*)r)->blendMode;
+}
+static bool d3d9GpuGetAlphaTestEnable(Renderer* r) {
+    DWORD value = FALSE;
+    Dev((D3D9Renderer*)r)->GetRenderState(D3DRS_ALPHATESTENABLE, &value);
+    return value != FALSE;
+}
+
 static void d3d9GpuSetBlendEnable(Renderer* r, bool enable) {
     Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_ALPHABLENDENABLE, enable ? TRUE : FALSE);
 }
@@ -1183,6 +1200,14 @@ static void d3d9GpuSetBlendMode(Renderer* r, int32_t mode) {
     d->SetRenderState(D3DRS_BLENDOP, op);
     d->SetRenderState(D3DRS_SRCBLEND, src);
     d->SetRenderState(D3DRS_DESTBLEND, dst);
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    dr->blendMode = mode;
+    r->blendFactors.src = mode == bm_min || mode == bm_max ? bm_one :
+                         (mode == bm_normal ? bm_src_alpha : bm_src_alpha);
+    r->blendFactors.dst = mode == bm_normal ? bm_inv_src_alpha :
+                         (mode == bm_min || mode == bm_max ? bm_one : bm_one);
+    r->blendFactors.srcAlpha = r->blendFactors.src;
+    r->blendFactors.dstAlpha = r->blendFactors.dst;
 }
 
 static void d3d9GpuSetBlendModeExt(Renderer* r, int32_t sf, int32_t df, int32_t sfa, int32_t dfa) {
@@ -1200,6 +1225,11 @@ static void d3d9GpuSetBlendModeExt(Renderer* r, int32_t sf, int32_t df, int32_t 
     d->SetRenderState(D3DRS_DESTBLEND, dst);
     d->SetRenderState(D3DRS_SRCBLENDALPHA, srcAlpha);
     d->SetRenderState(D3DRS_DESTBLENDALPHA, dstAlpha);
+    ((D3D9Renderer*)r)->blendMode = bm_complex;
+    r->blendFactors.src = sf;
+    r->blendFactors.dst = df;
+    r->blendFactors.srcAlpha = sfa;
+    r->blendFactors.dstAlpha = dfa;
 }
 static void d3d9ClearScreen(Renderer* r, uint32_t color, float alpha) {
     float cr, cg, cb, ca;
@@ -1244,12 +1274,15 @@ static void d3d9InitializeRendererVtable(void) {
     d3d9RendererVtable.clearScreen = d3d9ClearScreen;
     d3d9RendererVtable.createSpriteFromSurface = d3d9CreateSpriteFromSurfaceModern;
     d3d9RendererVtable.deleteSprite = d3d9DeleteSprite;
+    d3d9RendererVtable.gpuGetBlendFactors = d3d9GpuGetBlendFactors;
+    d3d9RendererVtable.gpuGetBlendMode = d3d9GpuGetBlendMode;
     d3d9RendererVtable.gpuSetBlendMode = d3d9GpuSetBlendMode;
     d3d9RendererVtable.gpuSetBlendModeExt = d3d9GpuSetBlendModeExt;
     d3d9RendererVtable.gpuSetBlendEnable = d3d9GpuSetBlendEnable;
     d3d9RendererVtable.gpuSetTexFilter = d3d9GpuSetTexFilter;
     d3d9RendererVtable.gpuGetBlendEnable = d3d9GpuGetBlendEnable;
     d3d9RendererVtable.gpuSetAlphaTestEnable = d3d9GpuSetAlphaTestEnable;
+    d3d9RendererVtable.gpuGetAlphaTestEnable = d3d9GpuGetAlphaTestEnable;
     d3d9RendererVtable.gpuSetAlphaTestRef = d3d9GpuSetAlphaTestRef;
     d3d9RendererVtable.gpuSetColorWriteEnable = d3d9GpuSetColorWriteEnable;
     d3d9RendererVtable.gpuGetColorWriteEnable = d3d9GpuGetColorWriteEnable;
