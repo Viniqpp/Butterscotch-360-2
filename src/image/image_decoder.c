@@ -1,0 +1,295 @@
+#include "image_decoder.h"
+
+#include "stdio_compat.h"
+#include <stdlib.h>
+#include "string_compat.h"
+#include <bzlib.h>
+
+#include "log.h"
+#include "utils.h"
+
+#ifdef USE_WUFFS_IMGDEC
+#define WUFFS_IMPLEMENTATION
+#define WUFFS_CONFIG__MODULES
+#define WUFFS_CONFIG__MODULE__BASE
+#define WUFFS_CONFIG__MODULE__CRC32
+#define WUFFS_CONFIG__MODULE__ADLER32
+#define WUFFS_CONFIG__MODULE__DEFLATE
+#define WUFFS_CONFIG__MODULE__ZLIB
+#define WUFFS_CONFIG__MODULE__PNG
+#define WUFFS_CONFIG__MODULE__BZIP2
+#include "wuffs-v0.4.c"
+#elif defined(USE_STB_IMGDEC)
+#include "stb_image.h"
+#endif
+
+#define QOI_HEADER_SIZE 12
+#define COMPRESSED_QOI_HEADER_SIZE_OLD 8
+#define COMPRESSED_QOI_HEADER_SIZE_NEW 12
+#if (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+    #define PACK_RGBA(r, g, b, a) (((uint32_t)(r) << 24) | ((uint32_t)(g) << 16) | ((uint32_t)(b) << 8) | (uint32_t)(a))
+    #define UNPACK_R(color) (((color) >> 24) & 0xFF)
+    #define UNPACK_G(color) (((color) >> 16) & 0xFF)
+    #define UNPACK_B(color) (((color) >> 8)  & 0xFF)
+    #define UNPACK_A(color) ((color)         & 0xFF)
+#else
+    #define PACK_RGBA(r, g, b, a) (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(r))
+    #define UNPACK_R(color) ((color)         & 0xFF)
+    #define UNPACK_G(color) (((color) >> 8)  & 0xFF)
+    #define UNPACK_B(color) (((color) >> 16) & 0xFF)
+    #define UNPACK_A(color) (((color) >> 24) & 0xFF)
+#endif
+
+// Sign-extend the low "bits" bits of "val" to an 8-bit two's-complement value.
+static inline uint8_t signExtend(uint32_t val, int bits) {
+    uint32_t mask = 1U << (bits - 1);
+    return (uint8_t)((val ^ mask) - mask);
+}
+
+// Decodes GameMaker's custom QOI format (ported from UndertaleModTool's QoiConverter).
+static uint8_t* decodeQoi(const uint8_t* restrict data, size_t dataSize, int* restrict outW, int* restrict outH) {
+    if (QOI_HEADER_SIZE > dataSize) return nullptr;
+    if (data[0] != 'f' || data[1] != 'i' || data[2] != 'o' || data[3] != 'q') return nullptr;
+
+    int width = data[4] | (data[5] << 8);
+    int height = data[6] | (data[7] << 8);
+    uint32_t length = (uint32_t)data[8] | ((uint32_t)data[9] << 8) | ((uint32_t)data[10] << 16) | ((uint32_t)data[11] << 24);
+
+    if (QOI_HEADER_SIZE + (size_t) length > dataSize) return nullptr;
+    if (0 >= width || 0 >= height) return nullptr;
+
+    const uint8_t* restrict pixelData = data + QOI_HEADER_SIZE;
+    const uint8_t* restrict pixelDataEnd = pixelData + length;
+    size_t rawSize = (size_t)width * (size_t)height;
+    uint32_t* restrict raw = (uint32_t*)safeMalloc(rawSize * sizeof(uint32_t));
+    if (!raw) return nullptr;
+
+    const uint32_t* rawStart = raw;
+    const uint32_t* rawEnd = raw + rawSize;
+    uint32_t index[64] = {0};
+
+    uint8_t r = 0, g = 0, b = 0, a = 255;
+    uint32_t packedCol = PACK_RGBA(r, g, b, a);
+
+    while (raw < rawEnd && pixelData < pixelDataEnd) {
+        uint8_t b1 = *pixelData++;
+
+        if ((b1 & 0xC0) == 0x00) {
+            // QOI_INDEX
+            packedCol = index[b1 & 0x3F];
+            r = UNPACK_R(packedCol);
+            g = UNPACK_G(packedCol);
+            b = UNPACK_B(packedCol);
+            a = UNPACK_A(packedCol);
+            *raw++ = packedCol;
+        } else if ((b1 & 0xE0) == 0x40) {
+            // QOI_RUN_8
+            size_t run = (b1 & 0x1F) + 1;
+            size_t remaining = rawEnd - raw;
+            if (run > remaining) run = remaining;
+
+            const uint32_t* end = raw + run;
+            while (raw < end) {
+                *raw++ = packedCol;
+            }
+        } else if ((b1 & 0xE0) == 0x60) {
+            // QOI_RUN_16
+            if (pixelData >= pixelDataEnd) { free((void*)rawStart); return nullptr; }
+            uint8_t b2 = *pixelData++;
+            size_t run = (((b1 & 0x1F) << 8) | b2) + 33;
+            size_t remaining = rawEnd - raw;
+            if (run > remaining) run = remaining;
+
+            const uint32_t* end = raw + run;
+            while (raw < end) {
+                *raw++ = packedCol;
+            }
+        } else if ((b1 & 0xC0) == 0x80) {
+            // QOI_DIFF_8 (2-2-2 signed deltas on r,g,b)
+            r += signExtend((b1 >> 4) & 3, 2);
+            g += signExtend((b1 >> 2) & 3, 2);
+            b += signExtend(b1 & 3, 2);
+            packedCol = PACK_RGBA(r, g, b, a);
+            index[(r ^ g ^ b ^ a) & 63] = packedCol;
+            *raw++ = packedCol;
+        } else if ((b1 & 0xE0) == 0xC0) {
+            // QOI_DIFF_16 (5-4-4 signed deltas on r,g,b)
+            if (pixelData >= pixelDataEnd) { free((void*)rawStart); return nullptr; }
+            uint8_t b2 = *pixelData++;
+            uint32_t merged = ((uint32_t)b1 << 8) | b2;
+            r += signExtend((merged >> 8) & 0x1F, 5);
+            g += signExtend((merged >> 4) & 0x0F, 4);
+            b += signExtend(merged & 0x0F, 4);
+            packedCol = PACK_RGBA(r, g, b, a);
+            index[(r ^ g ^ b ^ a) & 63] = packedCol;
+            *raw++ = packedCol;
+        } else if ((b1 & 0xF0) == 0xE0) {
+            // QOI_DIFF_24 (5-5-5-5 signed deltas on r,g,b,a)
+            if (pixelData + 1 >= pixelDataEnd) { free((void*)rawStart); return nullptr; }
+            uint8_t b2 = *pixelData++;
+            uint8_t b3 = *pixelData++;
+            uint32_t merged = ((uint32_t)b1 << 16) | ((uint32_t)b2 << 8) | b3;
+            r += signExtend((merged >> 15) & 0x1F, 5);
+            g += signExtend((merged >> 10) & 0x1F, 5);
+            b += signExtend((merged >> 5) & 0x1F, 5);
+            a += signExtend(merged & 0x1F, 5);
+            packedCol = PACK_RGBA(r, g, b, a);
+            index[(r ^ g ^ b ^ a) & 63] = packedCol;
+            *raw++ = packedCol;
+        } else if ((b1 & 0xF0) == 0xF0) {
+            // QOI_COLOR (per-channel raw bytes, only those with set bit flag)
+            if (b1 & 8) { if (pixelData >= pixelDataEnd) { free((void*)rawStart); return nullptr; } r = *pixelData++; }
+            if (b1 & 4) { if (pixelData >= pixelDataEnd) { free((void*)rawStart); return nullptr; } g = *pixelData++; }
+            if (b1 & 2) { if (pixelData >= pixelDataEnd) { free((void*)rawStart); return nullptr; } b = *pixelData++; }
+            if (b1 & 1) { if (pixelData >= pixelDataEnd) { free((void*)rawStart); return nullptr; } a = *pixelData++; }            
+            packedCol = PACK_RGBA(r, g, b, a);
+            index[(r ^ g ^ b ^ a) & 63] = packedCol;
+            *raw++ = packedCol;
+        }
+    }
+
+    *outW = width;
+    *outH = height;
+    return (uint8_t*)rawStart;
+}
+
+// Decodes BZip2-compressed custom QOI. The blob layout is:
+//   bytes 0..3 = "2zoq" magic
+//   bytes 4..5 = width (LE uint16)
+//   bytes 6..7 = height (LE uint16)
+//   bytes 8..11 = uncompressed BZ2 length (LE uint32) -- ONLY when gm2022_5 is true
+//   bytes 8.. (or 12.. if gm2022_5) = raw BZip2 stream, which decompresses into a full "fioq" QOI file.
+static uint8_t* decodeBz2Qoi(const uint8_t* blob, size_t blobSize, bool gm2022_5, int* outW, int* outH) {
+    size_t headerSize = gm2022_5 ? COMPRESSED_QOI_HEADER_SIZE_NEW : COMPRESSED_QOI_HEADER_SIZE_OLD;
+    if (headerSize > blobSize) return nullptr;
+
+    int width = blob[4] | (blob[5] << 8);
+    int height = blob[6] | (blob[7] << 8);
+    if (0 >= width || 0 >= height) return nullptr;
+
+    // Upper bound on decompressed QOI: header size + width*height*5 pixel data.
+    size_t uncompressedCapacity = QOI_HEADER_SIZE + (size_t) width * (size_t) height * 5;
+    uint8_t* uncompressed = (uint8_t*) malloc(uncompressedCapacity);
+    if (!uncompressed) return nullptr;
+#ifdef USE_WUFFS_IMGDEC
+    wuffs_bzip2__decoder dec;
+    wuffs_base__status status = wuffs_bzip2__decoder__initialize(&dec, sizeof(dec), WUFFS_VERSION, 0);
+    if (!wuffs_base__status__is_ok(&status)) {
+        free(uncompressed);
+        return nullptr;
+    }
+
+    wuffs_base__io_buffer dstBuf = wuffs_base__ptr_u8__writer(uncompressed, uncompressedCapacity);
+    wuffs_base__io_buffer srcBuf = wuffs_base__ptr_u8__reader((uint8_t*)(blob + headerSize), blobSize - headerSize, true);
+
+    wuffs_base__range_ii_u64 workbufLen = wuffs_bzip2__decoder__workbuf_len(&dec);
+    wuffs_base__slice_u8 workbuf = wuffs_base__empty_slice_u8();
+    if (workbufLen.max_incl > 0) {
+        uint8_t* workPtr = (uint8_t*)malloc(workbufLen.max_incl);
+        if (workPtr == nullptr) {
+            free(uncompressed);
+            return nullptr;
+        }
+        workbuf = wuffs_base__make_slice_u8(workPtr, workbufLen.max_incl);
+    }
+
+    status = wuffs_bzip2__decoder__transform_io(&dec, &dstBuf, &srcBuf, workbuf);
+
+    if (workbuf.ptr != nullptr) free(workbuf.ptr);
+
+    if (!wuffs_base__status__is_ok(&status)) {
+        logWarn("ImageDecoder: wuffs BZ2 decompress failed, trying libbzip2 fallback\n");
+        goto bzip2;
+    }
+
+bzip2:
+#endif 
+    {
+    int rc = BZ2_bzBuffToBuffDecompress((char*) uncompressed, (unsigned int*)&uncompressedCapacity, (char*)(blob + headerSize), (unsigned int)(blobSize - headerSize), 0, 0);
+    if (rc != BZ_OK) {
+        logWarn("ImageDecoder: libbzip2 decompress failed (rc=%d)\n", rc);
+        free(uncompressed);
+        return nullptr;
+    }
+
+    uint8_t* result = decodeQoi(uncompressed, uncompressedCapacity, outW, outH);
+    free(uncompressed);
+    return result;
+    }
+}
+
+uint8_t* ImageDecoder_decodeToRgba(const uint8_t* blob, size_t blobSize, bool gm2022_5, int* outW, int* outH) {
+    if (4 > blobSize || !blob) return nullptr;
+
+    // GameMaker custom QOI ("fioq")
+    if (blob[0] == 'f' && blob[1] == 'i' && blob[2] == 'o' && blob[3] == 'q') {
+        return decodeQoi(blob, blobSize, outW, outH);
+    }
+
+    // BZip2 + GameMaker custom QOI ("2zoq")
+    if (blob[0] == '2' && blob[1] == 'z' && blob[2] == 'o' && blob[3] == 'q') {
+        return decodeBz2Qoi(blob, blobSize, gm2022_5, outW, outH);
+    }
+
+#ifdef USE_WUFFS_IMGDEC
+    wuffs_png__decoder dec;
+    wuffs_base__status status = wuffs_png__decoder__initialize(&dec, sizeof(dec), WUFFS_VERSION, 0);
+    if (!wuffs_base__status__is_ok(&status)) return nullptr;
+
+    wuffs_base__image_decoder* imgDec = wuffs_png__decoder__upcast_as__wuffs_base__image_decoder(&dec);
+
+    wuffs_base__io_buffer src = wuffs_base__ptr_u8__reader((uint8_t*)blob, blobSize, true);
+
+    wuffs_base__image_config ic;
+    status = wuffs_base__image_decoder__decode_image_config(imgDec, &ic, &src);
+    if (!wuffs_base__status__is_ok(&status)) return nullptr;
+
+    uint32_t w = wuffs_base__pixel_config__width(&ic.pixcfg);
+    uint32_t h = wuffs_base__pixel_config__height(&ic.pixcfg);
+
+    wuffs_base__pixel_config__set(
+        &ic.pixcfg,
+        WUFFS_BASE__PIXEL_FORMAT__RGBA_NONPREMUL,
+        WUFFS_BASE__PIXEL_SUBSAMPLING__NONE,
+        w, h
+    );
+
+    size_t pixBufSize = (size_t)w * (size_t)h * 4;
+    uint8_t* pixels = (uint8_t*)safeMalloc(pixBufSize);
+    if (!pixels) return nullptr;
+
+    wuffs_base__pixel_buffer pb;
+    status = wuffs_base__pixel_buffer__set_from_slice(&pb, &ic.pixcfg, wuffs_base__make_slice_u8(pixels, pixBufSize));
+    if (!wuffs_base__status__is_ok(&status)) {
+        free(pixels);
+        return nullptr;
+    }
+
+    wuffs_base__range_ii_u64 workbufLen = wuffs_base__image_decoder__workbuf_len(imgDec);
+    wuffs_base__slice_u8 workbuf = wuffs_base__empty_slice_u8();
+    if (workbufLen.max_incl > 0) {
+        uint8_t* workPtr = (uint8_t*)safeMalloc(workbufLen.max_incl);
+        if (workPtr == nullptr) {
+            free(pixels);
+            return nullptr;
+        }
+        workbuf = wuffs_base__make_slice_u8(workPtr, workbufLen.max_incl);
+    }
+
+    status = wuffs_base__image_decoder__decode_frame(imgDec, &pb, &src, WUFFS_BASE__PIXEL_BLEND__SRC, workbuf, nullptr);
+
+    if (workbuf.ptr) free(workbuf.ptr);
+
+    if (!wuffs_base__status__is_ok(&status)) {
+        free(pixels);
+        return nullptr;
+    }
+#elif defined(USE_STB_IMGDEC)
+    int w, h, channels;
+    uint8_t* pixels = stbi_load_from_memory(blob, (int) blobSize, &w, &h, &channels, 4);
+    if (!pixels) return nullptr;
+#endif
+    *outW = (int)w;
+    *outH = (int)h;
+    return pixels;
+}
