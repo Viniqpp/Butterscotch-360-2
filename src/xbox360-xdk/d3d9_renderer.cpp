@@ -1130,36 +1130,76 @@ static void d3d9GpuGetColorWriteEnable(Renderer* r, bool* red, bool* green, bool
     if (blue) *blue = (mask & D3DCOLORWRITEENABLE_BLUE) != 0;
     if (alpha) *alpha = (mask & D3DCOLORWRITEENABLE_ALPHA) != 0;
 }
+static DWORD d3d9MapBlendFactor(int32_t factor) {
+    switch (factor) {
+        case bm_zero: return D3DBLEND_ZERO;
+        case bm_one: return D3DBLEND_ONE;
+        case bm_src_color: return D3DBLEND_SRCCOLOR;
+        case bm_inv_src_color: return D3DBLEND_INVSRCCOLOR;
+        case bm_src_alpha: return D3DBLEND_SRCALPHA;
+        case bm_inv_src_alpha: return D3DBLEND_INVSRCALPHA;
+        case bm_dest_alpha: return D3DBLEND_DESTALPHA;
+        case bm_inv_dest_alpha: return D3DBLEND_INVDESTALPHA;
+        case bm_dest_color: return D3DBLEND_DESTCOLOR;
+        case bm_inv_dest_color: return D3DBLEND_INVDESTCOLOR;
+        case bm_src_alpha_sat: return D3DBLEND_SRCALPHASAT;
+        default: return D3DBLEND_SRCALPHA;
+    }
+}
+
 static void d3d9GpuSetBlendMode(Renderer* r, int32_t mode) {
+    if (mode == bm_complex) return;
     IDirect3DDevice9* d = Dev((D3D9Renderer*)r);
     DWORD src = D3DBLEND_SRCALPHA, dst = D3DBLEND_INVSRCALPHA;
-    if (mode == bm_add) dst = D3DBLEND_ONE;
-    else if (mode == bm_subtract) { src = D3DBLEND_ZERO; dst = D3DBLEND_INVSRCCOLOR; }
+    DWORD op = D3DBLENDOP_ADD;
+    switch (mode) {
+        case bm_add:
+            dst = D3DBLEND_ONE;
+            break;
+        case bm_subtract:
+            src = D3DBLEND_SRCALPHA;
+            dst = D3DBLEND_ONE;
+            op = D3DBLENDOP_SUBTRACT;
+            break;
+        case bm_reverse_subtract:
+            src = D3DBLEND_SRCALPHA;
+            dst = D3DBLEND_ONE;
+            op = D3DBLENDOP_REVSUBTRACT;
+            break;
+        case bm_max:
+            src = D3DBLEND_ONE;
+            dst = D3DBLEND_ONE;
+            op = D3DBLENDOP_MAX;
+            break;
+        case bm_min:
+            src = D3DBLEND_ONE;
+            dst = D3DBLEND_ONE;
+            op = D3DBLENDOP_MIN;
+            break;
+        default:
+            break;
+    }
+    d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+    d->SetRenderState(D3DRS_BLENDOP, op);
     d->SetRenderState(D3DRS_SRCBLEND, src);
     d->SetRenderState(D3DRS_DESTBLEND, dst);
 }
+
 static void d3d9GpuSetBlendModeExt(Renderer* r, int32_t sf, int32_t df, int32_t sfa, int32_t dfa) {
-    (void)sfa; (void)dfa;
-    DWORD src = D3DBLEND_SRCALPHA, dst = D3DBLEND_INVSRCALPHA;
-    switch (sf) {
-        case bm_zero: src = D3DBLEND_ZERO; break; case bm_one: src = D3DBLEND_ONE; break;
-        case bm_src_color: src = D3DBLEND_SRCCOLOR; break; case bm_inv_src_color: src = D3DBLEND_INVSRCCOLOR; break;
-        case bm_src_alpha: src = D3DBLEND_SRCALPHA; break; case bm_inv_src_alpha: src = D3DBLEND_INVSRCALPHA; break;
-        case bm_dest_alpha: src = D3DBLEND_DESTALPHA; break; case bm_inv_dest_alpha: src = D3DBLEND_INVDESTALPHA; break;
-        case bm_dest_color: src = D3DBLEND_DESTCOLOR; break; case bm_inv_dest_color: src = D3DBLEND_INVDESTCOLOR; break;
-        case bm_src_alpha_sat: src = D3DBLEND_SRCALPHASAT; break;
-    }
-    switch (df) {
-        case bm_zero: dst = D3DBLEND_ZERO; break; case bm_one: dst = D3DBLEND_ONE; break;
-        case bm_src_color: dst = D3DBLEND_SRCCOLOR; break; case bm_inv_src_color: dst = D3DBLEND_INVSRCCOLOR; break;
-        case bm_src_alpha: dst = D3DBLEND_SRCALPHA; break; case bm_inv_src_alpha: dst = D3DBLEND_INVSRCALPHA; break;
-        case bm_dest_alpha: dst = D3DBLEND_DESTALPHA; break; case bm_inv_dest_alpha: dst = D3DBLEND_INVDESTALPHA; break;
-        case bm_dest_color: dst = D3DBLEND_DESTCOLOR; break; case bm_inv_dest_color: dst = D3DBLEND_INVDESTCOLOR; break;
-        case bm_src_alpha_sat: dst = D3DBLEND_SRCALPHASAT; break;
-    }
     IDirect3DDevice9* d = Dev((D3D9Renderer*)r);
+    DWORD src = d3d9MapBlendFactor(sf);
+    DWORD dst = d3d9MapBlendFactor(df);
+    DWORD srcAlpha = sfa >= bm_zero && sfa <= bm_src_alpha_sat
+        ? d3d9MapBlendFactor(sfa) : src;
+    DWORD dstAlpha = dfa >= bm_zero && dfa <= bm_src_alpha_sat
+        ? d3d9MapBlendFactor(dfa) : dst;
+    d->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE);
+    d->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    d->SetRenderState(D3DRS_BLENDOPALPHA, D3DBLENDOP_ADD);
     d->SetRenderState(D3DRS_SRCBLEND, src);
     d->SetRenderState(D3DRS_DESTBLEND, dst);
+    d->SetRenderState(D3DRS_SRCBLENDALPHA, srcAlpha);
+    d->SetRenderState(D3DRS_DESTBLENDALPHA, dstAlpha);
 }
 static void d3d9ClearScreen(Renderer* r, uint32_t color, float alpha) {
     float cr, cg, cb, ca;
