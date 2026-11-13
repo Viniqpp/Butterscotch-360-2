@@ -158,16 +158,26 @@ static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileS
     xa->maxPcmBytes = XDK_MAX_ACTIVE_PCM_BYTES;
 
     HRESULT hr = XAudio2Create((IXAudio2**)&xa->pXAudio2, 0, XAUDIO2_DEFAULT_PROCESSOR);
-    if (FAILED(hr)) {
+    if (FAILED(hr) || !xa->pXAudio2) {
         OutputDebugStringA("XAudio2Create failed\n");
+        if (xa->pXAudio2) {
+            ((IXAudio2*)xa->pXAudio2)->Release();
+            xa->pXAudio2 = NULL;
+        }
         return;
     }
 
     IXAudio2* pXA = (IXAudio2*)xa->pXAudio2;
     hr = pXA->CreateMasteringVoice((IXAudio2MasteringVoice**)&xa->pMasterVoice,
         XAUDIO2_DEFAULT_CHANNELS, XAUDIO2_DEFAULT_SAMPLERATE, 0, 0, NULL);
-    if (FAILED(hr)) {
+    if (FAILED(hr) || !xa->pMasterVoice) {
         DbgPrint("BS: CreateMasteringVoice failed: 0x%08X\n", (unsigned)hr);
+        if (xa->pMasterVoice) {
+            ((IXAudio2MasteringVoice*)xa->pMasterVoice)->DestroyVoice();
+            xa->pMasterVoice = NULL;
+        }
+        pXA->Release();
+        xa->pXAudio2 = NULL;
         return;
     }
     DbgPrint("BS: MasteringVoice created OK\n");
@@ -1076,6 +1086,7 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
         DbgPrint("BS: encoded PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
                  (unsigned)pcmBytes, xa->activePcmBytes, xa->maxPcmBytes);
         free(pcm);
+        destroyInstance(inst);
         return -1;
     }
 
