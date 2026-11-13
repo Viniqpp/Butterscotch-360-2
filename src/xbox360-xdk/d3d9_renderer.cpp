@@ -943,13 +943,11 @@ static int32_t d3d9EnsureApplicationSurface(Renderer* r, int32_t w, int32_t h) {
 }
 static float d3d9GetSurfaceWidth(Renderer* r, int32_t id) {
     if (id != APPLICATION_SURFACE_ID) return 0.0f;
-    return ((Renderer*)r)->runner ? (float)((Renderer*)r)->runner->applicationWidth
-                                  : (float)((D3D9Renderer*)r)->gameW;
+    return (float)((D3D9Renderer*)r)->gameW;
 }
 static float d3d9GetSurfaceHeight(Renderer* r, int32_t id) {
     if (id != APPLICATION_SURFACE_ID) return 0.0f;
-    return ((Renderer*)r)->runner ? (float)((Renderer*)r)->runner->applicationHeight
-                                  : (float)((D3D9Renderer*)r)->gameH;
+    return (float)((D3D9Renderer*)r)->gameH;
 }
 static void d3d9SurfaceResize(Renderer* r, int32_t id, int32_t w, int32_t h) { (void)r; (void)id; (void)w; (void)h; }
 static void d3d9SurfaceFree(Renderer* r, int32_t id) { (void)r; (void)id; }
