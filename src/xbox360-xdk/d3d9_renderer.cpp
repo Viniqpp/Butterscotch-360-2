@@ -243,16 +243,29 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
             DbgPrint("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
             continue;
         }
+        int expectedW = 0, expectedH = 0, expectedChannels = 0;
+        if (!stbi_info_from_memory(txtr->blobData, (int)txtr->blobSize,
+                                   &expectedW, &expectedH, &expectedChannels)) {
+            DbgPrint("BS: could not inspect TXTR page %u before decode\n", i);
+            continue;
+        }
+        uint64_t pixelBytes = (uint64_t)expectedW * (uint64_t)expectedH * 4u;
+        if (expectedW <= 0 || expectedH <= 0 || expectedW > 8192 || expectedH > 8192 ||
+            pixelBytes == 0 || pixelBytes > 64u * 1024u * 1024u) {
+            DbgPrint("BS: invalid or oversized TXTR dimensions for page %u (%d x %d)\n",
+                     i, expectedW, expectedH);
+            continue;
+        }
+
         int w = 0, h = 0, channels = 0;
         uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int)txtr->blobSize, &w, &h, &channels, 4);
         if (!pixels) {
             OutputDebugStringA("Failed to decode TXTR page\n");
             continue;
         }
-        uint64_t pixelBytes = (uint64_t)w * (uint64_t)h * 4u;
-        if (w <= 0 || h <= 0 || w > 8192 || h > 8192 ||
-            pixelBytes == 0 || pixelBytes > 64u * 1024u * 1024u) {
-            DbgPrint("BS: invalid or oversized TXTR dimensions for page %u (%d x %d)\n", i, w, h);
+        if (w != expectedW || h != expectedH) {
+            DbgPrint("BS: TXTR page %u dimensions changed during decode (%d x %d, expected %d x %d)\n",
+                     i, w, h, expectedW, expectedH);
             stbi_image_free(pixels);
             continue;
         }
