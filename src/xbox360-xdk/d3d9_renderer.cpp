@@ -140,6 +140,12 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         OutputDebugStringA("D3D9: vertex staging allocation failed\n");
         return;
     }
+    dr->primitiveVertexCapacity = D3D9_MAX_PRIMITIVE_VERTICES;
+    dr->primitiveVertexData = malloc((size_t)dr->primitiveVertexCapacity * sizeof(SpriteVertex));
+    if (!dr->primitiveVertexData) {
+        dr->primitiveVertexCapacity = 0;
+        OutputDebugStringA("D3D9: primitive vertex allocation failed; immediate primitives disabled\n");
+    }
 
     // Compile shaders from source
     ID3DXBuffer* pCode = NULL;
@@ -319,6 +325,7 @@ static void d3d9Destroy(Renderer* renderer) {
     free(dr->textureWidths);
     free(dr->textureHeights);
     free(dr->vertexData);
+    free(dr->primitiveVertexData);
     if (dr->whiteTexture) ((IDirect3DTexture9*)dr->whiteTexture)->Release();
     if (dr->pVertexShader) ((IDirect3DVertexShader9*)dr->pVertexShader)->Release();
     if (dr->pPixelShader) ((IDirect3DPixelShader9*)dr->pPixelShader)->Release();
@@ -1053,6 +1060,94 @@ static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, i
     (void)x; (void)y; (void)xs; (void)ys; (void)angle; (void)color; (void)alpha;
 }
 
+static void d3d9PrimitiveBegin(Renderer* renderer, int32_t primitiveType) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    if (!dr->initialized || !dr->primitiveVertexData || dr->primitiveVertexCapacity == 0) return;
+    flushBatch(dr);
+    dr->primitiveType = primitiveType;
+    dr->primitiveTexture = 0;
+    dr->primitiveVertexCount = 0;
+    dr->primitiveActive = true;
+}
+
+static void d3d9PrimitiveBeginTexture(Renderer* renderer, int32_t primitiveType, int32_t texture) {
+    d3d9PrimitiveBegin(renderer, primitiveType);
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    if (dr->primitiveActive) dr->primitiveTexture = texture > 0 ? texture : 0;
+}
+
+static void d3d9DrawVertex(Renderer* renderer, float x, float y, float z,
+                           uint32_t color, float alpha, float u, float v) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    if (!dr->primitiveActive || !dr->primitiveVertexData ||
+        dr->primitiveVertexCount >= dr->primitiveVertexCapacity) return;
+
+    int32_t page = dr->primitiveTexture > 0 ? dr->primitiveTexture - 1 : -1;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) page = -1;
+    ensureTexture(dr, page);
+
+    SpriteVertex* vertices = (SpriteVertex*)dr->primitiveVertexData;
+    SpriteVertex* vertex = &vertices[dr->primitiveVertexCount++];
+    float sx, sy, cr, cg, cb, ca;
+    transformPoint(dr, x, y, &sx, &sy);
+    bgrToFloatColor(color, alpha, &cr, &cg, &cb, &ca);
+    setVertex(vertex, sx, sy, u, v, cr, cg, cb, ca);
+    vertex->z = z;
+}
+
+static void d3d9PrimitiveEnd(Renderer* renderer) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    if (!dr->primitiveActive) return;
+    flushBatch(dr);
+
+    D3DPRIMITIVETYPE type;
+    uint32_t primitiveCount = 0;
+    switch (dr->primitiveType) {
+        case PRIMITIVE_POINTS:
+            type = D3DPT_POINTLIST;
+            primitiveCount = dr->primitiveVertexCount;
+            break;
+        case PRIMITIVE_LINES:
+            type = D3DPT_LINELIST;
+            primitiveCount = dr->primitiveVertexCount / 2;
+            break;
+        case PRIMITIVE_LINE_STRIP:
+            type = D3DPT_LINESTRIP;
+            primitiveCount = dr->primitiveVertexCount > 1 ? dr->primitiveVertexCount - 1 : 0;
+            break;
+        case PRIMITIVE_TRIANGLES:
+            type = D3DPT_TRIANGLELIST;
+            primitiveCount = dr->primitiveVertexCount / 3;
+            break;
+        case PRIMITIVE_TRIANGLE_STRIP:
+            type = D3DPT_TRIANGLESTRIP;
+            primitiveCount = dr->primitiveVertexCount > 2 ? dr->primitiveVertexCount - 2 : 0;
+            break;
+        case PRIMITIVE_TRIANGLE_FAN:
+            type = D3DPT_TRIANGLEFAN;
+            primitiveCount = dr->primitiveVertexCount > 2 ? dr->primitiveVertexCount - 2 : 0;
+            break;
+        default:
+            primitiveCount = 0;
+            type = D3DPT_TRIANGLELIST;
+            break;
+    }
+
+    if (primitiveCount > 0) {
+        int32_t page = dr->primitiveTexture > 0 ? dr->primitiveTexture - 1 : -1;
+        if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) page = -1;
+        ensureTexture(dr, page);
+        HRESULT hr = Dev(dr)->DrawPrimitiveUP(type, primitiveCount,
+            dr->primitiveVertexData, sizeof(SpriteVertex));
+        if (FAILED(hr)) DbgPrint("BS: primitive DrawPrimitiveUP failed: hr=0x%08X\\n", (unsigned)hr);
+    }
+
+    dr->primitiveActive = false;
+    dr->primitiveVertexCount = 0;
+    dr->primitiveTexture = 0;
+    dr->currentTextureIndex = -1;
+}
+
 // Unsupported surface/shader operations fail explicitly instead of dispatching
 // through a mismatched function pointer. These are capability gaps, not success.
 static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h) { (void)r; (void)w; (void)h; return -1; }
@@ -1086,12 +1181,53 @@ static void d3d9SurfaceCopy(Renderer* r, int32_t d, int32_t dx, int32_t dy, int3
     (void)r; (void)d; (void)dx; (void)dy; (void)src; (void)sx; (void)sy; (void)w; (void)h; (void)part;
 }
 static bool d3d9SurfaceGetPixels(Renderer* r, int32_t id, uint8_t* rgba) { (void)r; (void)id; (void)rgba; return false; }
-static uint32_t d3d9SpriteGetTexture(Renderer* r, int32_t i) { (void)r; (void)i; return 0; }
+static uint32_t d3d9SpriteGetTexture(Renderer* r, int32_t tpagIndex) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    DataWin* dw = r->dataWin;
+    if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return 0;
+    int32_t page = dw->tpag.items[tpagIndex].texturePageId;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) return 0;
+    return (uint32_t)tpagIndex + 1;
+}
 static uint32_t d3d9SurfaceGetTexture(Renderer* r, int32_t i) { (void)r; (void)i; return 0; }
-static float d3d9TextureGetTexelWidth(Renderer* r, uint32_t i) { (void)r; (void)i; return 0.0f; }
-static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t i) { (void)r; (void)i; return 0.0f; }
-static bool d3d9TextureGetUVs(Renderer* r, uint32_t i, float* uv) { (void)r; (void)i; (void)uv; return false; }
-static void d3d9TextureSetStage(Renderer* r, int32_t slot, uint32_t id) { (void)r; (void)slot; (void)id; }
+static float d3d9TextureGetTexelWidth(Renderer* r, uint32_t texID) {
+    DataWin* dw = r->dataWin;
+    if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    int32_t page = dw->tpag.items[texID - 1].texturePageId;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || dr->textureWidths[page] <= 0) return 0.0f;
+    return 1.0f / (float)dr->textureWidths[page];
+}
+static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
+    DataWin* dw = r->dataWin;
+    if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    int32_t page = dw->tpag.items[texID - 1].texturePageId;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || dr->textureHeights[page] <= 0) return 0.0f;
+    return 1.0f / (float)dr->textureHeights[page];
+}
+static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
+    DataWin* dw = r->dataWin;
+    if (!dw || !uv || texID == 0 || texID - 1 >= dw->tpag.count) return false;
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    TexturePageItem* t = &dw->tpag.items[texID - 1];
+    int32_t page = t->texturePageId;
+    if (page < 0 || (uint32_t)page >= dr->textureCount ||
+        dr->textureWidths[page] <= 0 || dr->textureHeights[page] <= 0) return false;
+    float w = (float)dr->textureWidths[page], h = (float)dr->textureHeights[page];
+    uv[0] = (float)t->sourceX / w;
+    uv[1] = (float)t->sourceY / h;
+    uv[2] = (float)(t->sourceX + t->sourceWidth) / w;
+    uv[3] = (float)(t->sourceY + t->sourceHeight) / h;
+    return true;
+}
+static void d3d9TextureSetStage(Renderer* r, int32_t slot, uint32_t texID) {
+    if (slot != 0) return;
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    int32_t page = texID > 0 ? (int32_t)texID - 1 : -1;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) page = -1;
+    ensureTexture(dr, page);
+}
 static void d3d9GpuSetShader(Renderer* r, int32_t i) { (void)r; (void)i; }
 static void d3d9GpuResetShader(Renderer* r) { (void)r; }
 static int32_t d3d9ShaderGetUniform(Renderer* r, int32_t s, char* n) { (void)r; (void)s; (void)n; return -1; }
@@ -1279,6 +1415,10 @@ static void d3d9InitializeRendererVtable(void) {
     d3d9RendererVtable.drawTextColor = d3d9DrawTextColorModern;
     d3d9RendererVtable.drawSpriteTiled = d3d9DrawSpriteTiled;
     d3d9RendererVtable.drawSurfaceTiled = d3d9DrawSurfaceTiled;
+    d3d9RendererVtable.primitiveBegin = d3d9PrimitiveBegin;
+    d3d9RendererVtable.primitiveBeginTexture = d3d9PrimitiveBeginTexture;
+    d3d9RendererVtable.primitiveEnd = d3d9PrimitiveEnd;
+    d3d9RendererVtable.drawVertex = d3d9DrawVertex;
     d3d9RendererVtable.flush = d3d9Flush;
     d3d9RendererVtable.clearScreen = d3d9ClearScreen;
     d3d9RendererVtable.createSpriteFromSurface = d3d9CreateSpriteFromSurfaceModern;
