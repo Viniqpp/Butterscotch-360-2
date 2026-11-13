@@ -39,6 +39,8 @@ typedef struct {
     int32_t* textureWidths;
     int32_t* textureHeights;
     uint32_t textureCount;
+    uint32_t textureBytesAllocated;
+    uint32_t maxTextureBytes;
 
     // 1x1 white texture for primitives
     void* whiteTexture;
