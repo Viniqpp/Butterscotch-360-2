@@ -13,8 +13,10 @@ static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
 
     // Only an actual drive-qualified path or a rooted path bypasses data.win's
     // directory. A colon in an ordinary filename is not an absolute-path marker.
-    bool driveQualified = relativePath[0] != '\0' && relativePath[1] == ':';
-    bool absolute = driveQualified || relativePath[0] == '\\' || relativePath[0] == '/';
+    const char* colon = strchr(relativePath, ':');
+    bool deviceQualified = colon && (size_t)(colon - relativePath) <= 8 &&
+                           (colon[1] == '\\' || colon[1] == '/');
+    bool absolute = deviceQualified || relativePath[0] == '\\' || relativePath[0] == '/';
     size_t baseLen = absolute ? 0 : strlen(xfs->basePath);
     size_t relLen = strlen(relativePath);
     if (relLen > (size_t)-1 - baseLen - 1) return NULL;
