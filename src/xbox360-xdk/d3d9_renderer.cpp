@@ -1345,10 +1345,13 @@ static void d3d9GpuSetBlendMode(Renderer* r, int32_t mode) {
     d->SetRenderState(D3DRS_DESTBLEND, dst);
     D3D9Renderer* dr = (D3D9Renderer*)r;
     dr->blendMode = mode;
-    r->blendFactors.src = mode == bm_min || mode == bm_max ? bm_one :
-                         (mode == bm_normal ? bm_src_alpha : bm_src_alpha);
-    r->blendFactors.dst = mode == bm_normal ? bm_inv_src_alpha :
-                         (mode == bm_min || mode == bm_max ? bm_one : bm_one);
+    if (mode == bm_min || mode == bm_max) {
+        r->blendFactors.src = bm_one;
+        r->blendFactors.dst = bm_one;
+    } else {
+        r->blendFactors.src = bm_src_alpha;
+        r->blendFactors.dst = mode == bm_normal ? bm_inv_src_alpha : bm_one;
+    }
     r->blendFactors.srcAlpha = r->blendFactors.src;
     r->blendFactors.dstAlpha = r->blendFactors.dst;
 }
