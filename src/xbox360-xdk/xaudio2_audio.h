@@ -7,6 +7,8 @@
 #define XDK_SOUND_INSTANCE_ID_BASE 100000
 #define XDK_AUDIO_STREAM_INDEX_BASE 300000
 
+// File-backed stream registry. The XDK adapter currently pre-decodes each
+// stream into bounded PCM at playback time; it is not yet a ring-buffer streamer.
 typedef struct {
     bool active;
     char* filePath;
