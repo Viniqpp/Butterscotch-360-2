@@ -9,22 +9,24 @@
 
 static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     XdkFileSystem* xfs = (XdkFileSystem*)fs;
-    if (relativePath == NULL) return NULL;
+    if (!xfs || !relativePath) return NULL;
 
-    // Absolute drive paths are passed through; ordinary game paths are rooted
-    // beside data.win. The XDK accepts game:\\ and d:\\ style paths.
-    bool absolute = (strchr(relativePath, ':') != NULL) ||
-                    (relativePath[0] == '\\') ||
-                    (relativePath[0] == '/');
+    // Only an actual drive-qualified path or a rooted path bypasses data.win's
+    // directory. A colon in an ordinary filename is not an absolute-path marker.
+    bool driveQualified = relativePath[0] != '\0' && relativePath[1] == ':';
+    bool absolute = driveQualified || relativePath[0] == '\\' || relativePath[0] == '/';
     size_t baseLen = absolute ? 0 : strlen(xfs->basePath);
     size_t relLen = strlen(relativePath);
+    if (relLen > (size_t)-1 - baseLen - 1) return NULL;
     char* result = (char*)malloc(baseLen + relLen + 1);
     if (!result) return NULL;
 
     if (baseLen) memcpy(result, xfs->basePath, baseLen);
     memcpy(result + baseLen, relativePath, relLen + 1);
 
-    for (char* p = result + baseLen; *p; ++p) {
+    // Normalize the entire joined path, including the base path copied from
+    // data.win. Mixed slash styles otherwise leak into XDK file operations.
+    for (char* p = result; *p; ++p) {
         if (*p == '/') *p = '\\';
     }
     return result;
@@ -79,11 +81,12 @@ static char* xdkReadFileText(FileSystem* fs, const char* relativePath) {
     if (file == INVALID_HANDLE_VALUE) return NULL;
 
     DWORD size = 0;
-    if (!xdkGetFileSize(file, &size)) {
+    if (!xdkGetFileSize(file, &size) || size > 0x7fffffffU) {
         CloseHandle(file);
         return NULL;
     }
 
+    // Bound the text API before adding its NUL terminator on a 32-bit target.
     char* buffer = (char*)malloc((size_t)size + 1);
     if (!buffer) {
         CloseHandle(file);
@@ -240,14 +243,18 @@ static int32_t xdkBinaryWrite(FileSystem* fs, void* handle, const void* src, int
 static int32_t xdkBinaryTell(FileSystem* fs, void* handle) {
     (void)fs;
     if (!handle) return -1;
-    DWORD position = SetFilePointer((HANDLE)handle, 0, NULL, FILE_CURRENT);
-    return position == INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR
-        ? -1 : (int32_t)position;
+    LONG high = 0;
+    SetLastError(NO_ERROR);
+    DWORD low = SetFilePointer((HANDLE)handle, 0, &high, FILE_CURRENT);
+    if ((low == INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR) ||
+        high != 0 || low > 0x7fffffffU) return -1;
+    return (int32_t)low;
 }
 
 static bool xdkBinarySeek(FileSystem* fs, void* handle, int32_t position) {
     (void)fs;
     if (!handle || position < 0) return false;
+    SetLastError(NO_ERROR);
     DWORD result = SetFilePointer((HANDLE)handle, (LONG)position, NULL, FILE_BEGIN);
     return !(result == INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR);
 }
@@ -320,17 +327,28 @@ static FileSystemDirEntry* xdkListDirectory(FileSystem* fs, const char* relative
     if (search == INVALID_HANDLE_VALUE) return NULL;
 
     FileSystemDirEntry* entries = NULL;
+    bool allocationFailed = false;
     do {
         if (strcmp(found.cFileName, ".") == 0 || strcmp(found.cFileName, "..") == 0) continue;
         FileSystemDirEntry entry;
         size_t nameLen = strlen(found.cFileName);
         entry.name = (char*)malloc(nameLen + 1);
-        if (!entry.name) continue;
+        if (!entry.name) {
+            allocationFailed = true;
+            break;
+        }
         memcpy(entry.name, found.cFileName, nameLen + 1);
         entry.isDirectory = (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         arrput(entries, entry);
     } while (FindNextFileA(search, &found));
+
+    DWORD enumerationError = GetLastError();
     FindClose(search);
+    if (allocationFailed || enumerationError != ERROR_NO_MORE_FILES) {
+        for (size_t i = 0; i < arrlen(entries); i++) free(entries[i].name);
+        arrfree(entries);
+        return NULL;
+    }
     return entries;
 }
 
@@ -372,9 +390,15 @@ XdkFileSystem* XdkFileSystem_create(const char* dataWinPath) {
     if (!lastSlash && dataWinPath) lastSlash = strrchr(dataWinPath, '/');
     if (lastSlash) {
         size_t dirLen = (size_t)(lastSlash - dataWinPath + 1);
-        if (dirLen >= sizeof(xfs->basePath)) dirLen = sizeof(xfs->basePath) - 1;
+        if (dirLen >= sizeof(xfs->basePath)) {
+            free(xfs);
+            return NULL;
+        }
         memcpy(xfs->basePath, dataWinPath, dirLen);
         xfs->basePath[dirLen] = '\0';
+        for (char* p = xfs->basePath; *p; ++p) {
+            if (*p == '/') *p = '\\';
+        }
     } else {
         strcpy(xfs->basePath, "game:\\");
     }
