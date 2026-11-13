@@ -67,8 +67,12 @@ static XdkSoundInstance* findFreeSlot(XdkAudioSystem* xa) {
     return NULL;
 }
 
+static bool xdkIsInstanceId(int32_t id) {
+    return id >= XDK_SOUND_INSTANCE_ID_BASE && id < XDK_AUDIO_STREAM_INDEX_BASE;
+}
+
 static XdkSoundInstance* findById(XdkAudioSystem* xa, int32_t id) {
-    if (id < XDK_SOUND_INSTANCE_ID_BASE) return NULL;
+    if (!xdkIsInstanceId(id)) return NULL;
     XdkInstanceArray* arr = Instances(xa);
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
         XdkSoundInstance* inst = &arr->instances[i];
@@ -80,7 +84,7 @@ static XdkSoundInstance* findById(XdkAudioSystem* xa, int32_t id) {
 // Allocate monotonically increasing public IDs rather than deriving them from
 // reusable instance slots. Wrap safely while avoiding IDs held by active voices.
 static int32_t allocateInstanceId(XdkAudioSystem* xa) {
-    const int32_t maxCounter = 0x7fffffff - XDK_SOUND_INSTANCE_ID_BASE;
+    const int32_t maxCounter = XDK_AUDIO_STREAM_INDEX_BASE - XDK_SOUND_INSTANCE_ID_BASE;
     XdkInstanceArray* arr = Instances(xa);
     for (int attempt = 0; attempt <= XDK_MAX_SOUND_INSTANCES; attempt++) {
         if (xa->nextInstanceCounter < 0 || xa->nextInstanceCounter >= maxCounter)
@@ -142,8 +146,11 @@ static bool xdkApplyInstancePitch(XdkSoundInstance* inst, float pitch) {
 static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (inst && inst->pVoice) {
-        float groupGain = inst->soundIndex >= 0
-            ? AudioSystem_soundGroupGain(audio, inst->soundIndex) : 1.0f;
+        float groupGain = 1.0f;
+        if (inst->soundIndex >= 0 && xa->base.dw &&
+            (uint32_t)inst->soundIndex < xa->base.dw->sond.count) {
+            groupGain = AudioSystem_soundGroupGain(audio, inst->soundIndex);
+        }
         HRESULT hr = inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain * groupGain);
         if (FAILED(hr)) DbgPrint("BS: SetVolume update failed: hr=0x%08X\n", (unsigned)hr);
     }
@@ -212,6 +219,11 @@ static void xdkAudioDestroy(AudioSystem* audio) {
             if (arr->instances[i].active) destroyInstance(&arr->instances[i]);
         }
         free(arr);
+    }
+    for (int32_t i = 0; i < XDK_MAX_AUDIO_STREAMS; i++) {
+        free(xa->streams[i].filePath);
+        xa->streams[i].filePath = NULL;
+        xa->streams[i].active = false;
     }
 
     for (int32_t i = 1; i < (int32_t)arrlen(audio->audioGroups); ++i) {
@@ -682,7 +694,10 @@ static void xdkStopAll(AudioSystem* audio) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-        if (arr->instances[i].active) destroyInstance(&arr->instances[i]);
+        // Encoded FMOD-owned voices are deliberately not affected by game
+        // sound stop-all operations.
+        if (arr->instances[i].active && arr->instances[i].soundIndex >= 0)
+            destroyInstance(&arr->instances[i]);
     }
 }
 
@@ -763,14 +778,18 @@ static void xdkResumeSound(AudioSystem* audio, int32_t soundOrInstance) {
 
 static void xdkPauseAll(AudioSystem* audio) {
     XdkInstanceArray* arr = Instances((XdkAudioSystem*)audio);
-    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++)
-        xdkPauseInstance(&arr->instances[i]);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        if (arr->instances[i].active && arr->instances[i].soundIndex >= 0)
+            xdkPauseInstance(&arr->instances[i]);
+    }
 }
 
 static void xdkResumeAll(AudioSystem* audio) {
     XdkInstanceArray* arr = Instances((XdkAudioSystem*)audio);
-    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++)
-        xdkResumeInstance(&arr->instances[i]);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        if (arr->instances[i].active && arr->instances[i].soundIndex >= 0)
+            xdkResumeInstance(&arr->instances[i]);
+    }
 }
 
 static void xdkApplyGainTarget(XdkAudioSystem* xa, AudioSystem* audio,
@@ -1242,13 +1261,45 @@ static void xdkSetGroupGain(AudioSystem* audio, int32_t groupIndex, float gain, 
 }
 
 static int32_t xdkCreateStream(AudioSystem* audio, const char* filename) {
-    (void)audio; (void)filename;
-    return -1; // Stream voices are not implemented by this decoder-backed adapter.
+    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
+    if (!xa || !xa->initialized || !xa->fileSystem || !filename || !filename[0]) return -1;
+
+    int32_t slot = -1;
+    for (int32_t i = 0; i < XDK_MAX_AUDIO_STREAMS; i++) {
+        if (!xa->streams[i].active) { slot = i; break; }
+    }
+    if (slot < 0) return -1;
+
+    char* resolved = xa->fileSystem->vtable->resolvePath(xa->fileSystem, filename);
+    if (!resolved) {
+        DbgPrint("BS: could not resolve stream path '%s'\n", filename);
+        return -1;
+    }
+
+    XdkAudioStream* stream = &xa->streams[slot];
+    stream->active = true;
+    stream->filePath = resolved;
+    stream->initialGain = 1.0f;
+    stream->initialPitch = 1.0f;
+    stream->lengthSeconds = -1.0f;
+    return XDK_AUDIO_STREAM_INDEX_BASE + slot;
 }
 
 static bool xdkDestroyStream(AudioSystem* audio, int32_t streamIndex) {
-    (void)audio; (void)streamIndex;
-    return false;
+    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
+    int32_t slot = streamIndex - XDK_AUDIO_STREAM_INDEX_BASE;
+    if (!xa || slot < 0 || slot >= XDK_MAX_AUDIO_STREAMS || !xa->streams[slot].active)
+        return false;
+
+    XdkInstanceArray* arr = Instances(xa);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        if (arr->instances[i].active && arr->instances[i].soundIndex == streamIndex)
+            destroyInstance(&arr->instances[i]);
+    }
+
+    free(xa->streams[slot].filePath);
+    memset(&xa->streams[slot], 0, sizeof(xa->streams[slot]));
+    return true;
 }
 
 static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t bytes, bool loop) {
