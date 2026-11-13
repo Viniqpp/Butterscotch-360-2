@@ -360,3 +360,144 @@ Legend: **P0** = blocker / required for basic play; **P1** = required for full g
 **Not established:** exact built-in function call inventories per chapter; exact WAD/build numbers for the paid Chapter 3–5 data.win files; whether the Steam DLLs are called by each chapter; complete shader/surface/video usage per chapter; actual Xbox 360 runtime compatibility; XDK compilation success; frame rate and memory use.
 
 No testing or compilation is claimed. This is a static compatibility investigation intended to guide the next binary-level audit and test plan.
+
+
+---
+
+## 13. SECOND RESEARCH PASS — deeper audit and implementation plan
+
+**Research pass date:** 2026-11-13  
+**Latest refs checked for this pass:** upstream ButterscotchRunner/Butterscotch main at 0c94bfb05e3cb4b8946a38f8085747035dd37f94; working fork branch refresh2/modern-upstream-migration at ace71ba9b6432bc35acf6843d92eb6923c38d8cc. The report file was read at blob bbd0946b12819648de04d671e87beccc5131614d before this addition.
+
+This pass supplements the source-level findings above. It does not replace the original findings or upgrade any untested feature to “working”.
+
+### 13.1 Evidence screening: what the research pass can and cannot establish
+
+The supplementary research output proposed that both games had been launched, controller input exercised, screenshots compared, complete music tracks listened to, and opcode profiling performed (including a reported ~1.5× slowdown). Those are empirical claims. No corresponding game binaries, test logs, screenshots, profiler output, test-run IDs or hardware session records were available to independently verify them during this repository update. **Those claims are deliberately not recorded as test results.** The project remains at the static-source/documentation status described in this report.
+
+Likewise, recommendations to add no-op implementations for unknown functions are not accepted as a general compatibility fix. A dummy return value can hide a missing API while corrupting game state. Only implement a stub when the exact call site and expected semantics are understood and the title demonstrably does not depend on the result.
+
+### 13.2 WAD support versus actual game compatibility
+
+The current upstream README still lists WAD 8–17, including WAD16 for GameMaker 1.4.1767+ and WAD17 for GameMaker Studio 2.2+. It also explicitly warns that supported WAD versions do not guarantee that a game will run, because bytecode support remains a work in progress.
+
+**Implementation consequence:** treat format parsing, VM execution and platform services as separate acceptance gates:
+
+1. **Container gate:** GEN8 and all required chunks parse without unknown or malformed resource layouts.
+2. **VM gate:** all opcodes, variable semantics, call-frame behavior and built-ins actually referenced by that data.win are supported.
+3. **Runtime-services gate:** drawing, audio, input, filesystem, surfaces, shaders, video and extensions satisfy the calls the game makes.
+4. **Platform gate:** the XDK backend builds and runs correctly on target hardware or emulator.
+
+Passing gate 1 must never be reported as “WAD17 game compatible”. The actual GEN8 header from each test copy of data.win remains authoritative; version tables and release labels are discovery aids only.
+
+### 13.3 Turn the game files into a concrete API contract
+
+Before implementing speculative compatibility shims, build a repeatable per-build inventory from the exact game binaries.
+
+For every test data.win, record:
+- SHA-256 (and MD5 only when comparing with a published catalog entry);
+- GEN8 GameMaker version/build and WAD version;
+- chunk IDs and resource-version fields;
+- extension names, function names and external DLL names from EXTn;
+- shader, sequence, audio-group, video and surface-related resources;
+- every distinct built-in function and built-in variable referenced by compiled code;
+- script/function names and bytecode opcode histogram.
+
+Then compare the extracted built-in/variable list with the runner registration and variable access paths in src/vm_builtins.c, src/vm_builtins.h, src/vm.c and the relevant resource loaders. Keep one inventory per chapter/data.win: do not infer that Chapter 5 uses the same APIs as Chapter 2 merely because they share a franchise and launcher.
+
+**Acceptance rule:** every missing function/variable must have a disposition: implemented with matching semantics; safely unsupported because the game cannot reach the call; or a documented blocker. “Unknown function” log suppression is not a disposition.
+
+### 13.4 VM regression tests that should exist before chapter testing
+
+Add small deterministic tests around the WAD16/WAD17 semantics identified in the source review. At minimum:
+
+| Test area | Required cases | Failure caught |
+|---|---|---|
+| Call frames / arguments | nested script calls; zero and many arguments; argument slots 0–15; return through nested calls | incorrect argument indexing or stack restoration |
+| Instance context | self/other changes; instance argument; instance stack top; method call with bound instance | wrong self/other or call-frame context |
+| Arrays | nested arrays; pass/return arrays; mutation after copy; deletion and reassignment | copy-on-write/refcount corruption |
+| Structs / methods | field get/set; missing field; method binding; constructor and return value | GMS2 object model mismatch |
+| Variables | local/global/instance scope; built-in variable access; dynamic variable lookup | wrong scope or built-in dispatch |
+| Lifecycle | create/destroy/cleanup; room transition; alarm and draw event order | state leaks or event ordering bugs |
+| Resource loading | malformed/unknown chunk diagnostics; optional fields; version-gated parsing | silent acceptance of incompatible data |
+
+Tests should assert values and state, not merely “no crash”. Include at least one regression fixture from each real game build once the data.win inventory identifies the relevant opcode/API paths.
+
+### 13.5 XDK service adapters: implementation priorities
+
+The second pass reinforces that platform adapters must be evaluated against the modern runner interfaces, not against the old port's narrower contract.
+
+**Renderer — P0 integration blocker**
+- Reconcile src/xbox360-xdk/d3d9_renderer.cpp with the complete modern RendererVtable in src/renderer.h.
+- Use Runner_create validation in src/runner.c as the definitive required-callback checklist.
+- Implement and test renderer lifecycle first: create/destroy, begin/end frame, GUI pass, texture create/update/destroy, surface create/bind/clear/destroy, shader selection/uniform/sampler calls, blend modes and view/viewport state.
+- Do not report renderer integration complete while callbacks are missing or represented by unsafe no-ops. Explicitly return failure for unsupported operations until their semantics are implemented.
+- Add a headless contract test that constructs the vtable and checks every required callback before attempting a game launch.
+
+**Audio — P1 for Undertale; P0/P1 for rhythm-synchronized Deltarune content**
+- Audit src/xbox360-xdk/xaudio2_audio.cpp against the current AudioVtable and actual audio calls extracted from each chapter.
+- Give special attention to track position/seek, pause/resume, loop boundaries, pitch/rate, channel count and device-loss recovery. The migration notes document unsupported or incomplete areas; the old Undertale “too fast” report makes playback-rate validation mandatory.
+- Create a deterministic audio test using a known sample and expected duration/sample count; separately test music-synchronized game sequences. Audible output alone is insufficient.
+
+**Input — native gamepad parity**
+- Keep the existing XInput-to-keyboard mapping as a compatibility layer, but also bridge connected controller state into RunnerGamepad in src/runner_gamepad.c.
+- Map buttons, axes, triggers, deadzones, connection/disconnection and reconnect state. Test both keyboard-style input and native gamepad_* calls.
+- Verify edge transitions (pressed/released) and avoid reporting a connected controller with stale button/axis state.
+
+**Video — chapter-specific requirement**
+- The XDK null backend is not a decoder. For Chapter 3, first verify whether the game checks for unavailable video and can enter its skip/fallback route. If not, implement a supported decoder or deliberate game-specific compatibility path; do not silently claim video support.
+- Add a test that records video API calls and checks the game reaches the first interactive state after the VHS scene.
+
+**Filesystem — chapter transfer, not just basic save**
+- Test create/write/close/reopen/read, rename, delete, directory enumeration, path normalization and interrupted writes.
+- Test the Chapter 1 completion → Chapter 2 import flow with valid and absent/corrupt transfer data. Test separate chapter save slots and repeated launch/reload cycles.
+
+### 13.6 Rendering and memory: measure the actual workload
+
+Avoid assumptions based only on nominal screen resolution or the 360's headline memory capacity. Extract texture dimensions/formats and surface creation patterns from each game, then instrument the renderer to record:
+- live texture count and bytes by format;
+- largest texture and largest render target;
+- peak simultaneous surface allocation;
+- texture upload and render-target bind failures;
+- surface/texture allocations not released after room changes;
+- frame time split between VM, draw submission, texture upload and audio.
+
+For Xenos textures, verify the actual tiled/linear allocation and sampling path on the target API. A source comment describing a required tiled copy is not evidence that the copy occurs. Compare nearest and linear filtering with pixel-art scenes and scenes that expect interpolation. Shader support must be assessed per game resource and shader profile; a platform blit shader does not establish support for arbitrary GameMaker shaders or third-party shader extensions.
+
+### 13.7 Chapter-by-chapter acceptance checklist
+
+| Target | Minimum pass before calling it “bootable” | Minimum pass before calling it “playable” |
+|---|---|---|
+| Undertale v1.08 | title/menu appears; no parser/VM fatal errors | start new game; movement/dialogue; encounter and battle; save/load; correct audio speed; representative boss pattern |
+| Deltarune 2018 SURVEY_PROGRAM | capture and classify its known startup failure | only mark playable if the original documented boot issue is actually resolved |
+| Deltarune Ch. 1–2 | correct chapter data loads; title/menu and first room | complete Chapter 1→2 transfer; controller; battle; audio sync; save/load |
+| Deltarune Ch. 3 | title/menu and first room; video API path observed | VHS scene/fallback; rhythm sequence; audio recovery; combat and save |
+| Deltarune Ch. 4 | title/menu and first room | chapter-specific minigames/input; battle; save/load; long-session stability |
+| Deltarune Ch. 5 | title/menu and first room; audio groups load | chapter-specific scenes; large assets; audio sync; save/transfer; long-session stability |
+
+Every result must include exact game build, data.win hash, runner commit, platform build identifier, device/emulator, test scene, and log/artifact references. “Booted” and “playable” must remain distinct statuses.
+
+### 13.8 Revised implementation order
+
+1. **Freeze test inputs:** obtain legally sourced Windows data.win files and record hashes/GEN8 metadata for Undertale v1.08 and each intended Deltarune chapter.
+2. **Complete renderer contract:** make Runner_create succeed with a complete, semantically correct XDK renderer vtable.
+3. **Build a headless parser/VM regression suite:** validate WAD16 and WAD17 paths before layering XDK failures on top.
+4. **Complete essential platform services:** native gamepad state, correct audio clock/seek behavior, save/transfer filesystem semantics, and Chapter 3 video fallback/decoder.
+5. **Run Undertale v1.08 first:** use it to stabilize WAD16, drawing, audio, input and saves.
+6. **Use the 2018 Deltarune demo as a regression target**, then test the actual 2021/paid Chapter 1 and Chapter 2 data files independently.
+7. **Audit and test Chapters 3, 4 and 5 independently**, prioritizing their unique resources and services.
+8. **Profile and optimize only after correctness:** gather memory/frame/audio measurements from reproducible scenes before choosing texture downscaling, caching or VM optimization.
+
+### 13.9 Pass-two conclusion
+
+The deep research strengthens the implementation plan, but it does not provide verified runtime evidence. The most important engineering conclusion remains unchanged: **the current XDK renderer contract is the first hard blocker**, and WAD16/WAD17 parser support alone cannot establish game compatibility. The next highest-value task is to produce a per-data.win API/resource inventory and use it to drive VM and adapter tests. No code was changed by this research pass; only this report is being updated.
+
+### Additional references checked in pass two
+
+- [Upstream README at inspected HEAD — WAD list and explicit compatibility caveat](https://github.com/ButterscotchRunner/Butterscotch/blob/0c94bfb05e3cb4b8946a38f8085747035dd37f94/README.md)
+- [Upstream VM at inspected HEAD](https://github.com/ButterscotchRunner/Butterscotch/blob/0c94bfb05e3cb4b8946a38f8085747035dd37f94/src/vm.c)
+- [Current fork renderer contract at pass-two HEAD](https://github.com/Viniqpp/Butterscotch-360-2/blob/ace71ba9b6432bc35acf6843d92eb6923c38d8cc/src/renderer.h)
+- [Current fork migration status at pass-two HEAD](https://github.com/Viniqpp/Butterscotch-360-2/blob/ace71ba9b6432bc35acf6843d92eb6923c38d8cc/docs/XBOX360_REFRESH2_MIGRATION.md)
+- [Current fork XDK renderer at pass-two HEAD](https://github.com/Viniqpp/Butterscotch-360-2/blob/ace71ba9b6432bc35acf6843d92eb6923c38d8cc/src/xbox360-xdk/d3d9_renderer.cpp)
+- [Current fork XDK audio adapter at pass-two HEAD](https://github.com/Viniqpp/Butterscotch-360-2/blob/ace71ba9b6432bc35acf6843d92eb6923c38d8cc/src/xbox360-xdk/xaudio2_audio.cpp)
+- [Current fork XDK input loop at pass-two HEAD](https://github.com/Viniqpp/Butterscotch-360-2/blob/ace71ba9b6432bc35acf6843d92eb6923c38d8cc/src/xbox360-xdk/main.cpp)
