@@ -263,8 +263,15 @@ static int32_t xdkBinarySize(FileSystem* fs, void* handle) {
 static void xdkBinaryRewrite(FileSystem* fs, void* handle) {
     (void)fs;
     if (!handle) return;
-    SetFilePointer((HANDLE)handle, 0, NULL, FILE_BEGIN);
-    SetEndOfFile((HANDLE)handle);
+    SetLastError(NO_ERROR);
+    DWORD position = SetFilePointer((HANDLE)handle, 0, NULL, FILE_BEGIN);
+    if (position == INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR) {
+        DbgPrint("BS: BinaryRewrite seek failed: 0x%08X\\n", (unsigned)GetLastError());
+        return;
+    }
+    if (!SetEndOfFile((HANDLE)handle)) {
+        DbgPrint("BS: BinaryRewrite truncate failed: 0x%08X\\n", (unsigned)GetLastError());
+    }
 }
 
 static bool xdkDirectoryExists(FileSystem* fs, const char* relativePath) {
