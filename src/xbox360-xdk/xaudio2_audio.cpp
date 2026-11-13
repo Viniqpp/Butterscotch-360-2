@@ -1157,11 +1157,17 @@ static void xdkSetListenerPosition(AudioSystem* audio, float x, float y, float z
 }
 
 static void xdkSuspend(AudioSystem* audio) {
-    xdkPauseAll(audio);
+    // Platform suspension must also stop FMOD/encoded voices, unlike the
+    // GameMaker audio_pause_all operation which intentionally excludes them.
+    XdkInstanceArray* arr = Instances((XdkAudioSystem*)audio);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++)
+        xdkPauseInstance(&arr->instances[i]);
 }
 
 static void xdkResume(AudioSystem* audio) {
-    xdkResumeAll(audio);
+    XdkInstanceArray* arr = Instances((XdkAudioSystem*)audio);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++)
+        xdkResumeInstance(&arr->instances[i]);
 }
 
 static bool xdkReadExternalAudioForLength(XdkAudioSystem* xa, const char* file,
