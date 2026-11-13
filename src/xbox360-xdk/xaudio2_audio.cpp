@@ -827,11 +827,8 @@ static float xdkGetSoundPitch(AudioSystem* audio, int32_t soundOrInstance) {
     return 1.0f;
 }
 
-static float xdkGetTrackPosition(AudioSystem* audio, int32_t soundOrInstance) {
-    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    XdkSoundInstance* inst = findById(xa, soundOrInstance);
+static float xdkInstanceTrackPosition(XdkSoundInstance* inst) {
     if (!inst || !inst->pVoice || inst->sampleRate == 0 || inst->channels == 0) return 0.0f;
-
     XAUDIO2_VOICE_STATE state;
     inst->pVoice->GetState(&state, 0);
     uint64_t played = state.SamplesPlayed >= inst->samplesPlayedAtSeek
@@ -850,28 +847,47 @@ static float xdkGetTrackPosition(AudioSystem* audio, int32_t soundOrInstance) {
     return (float)position / (float)inst->sampleRate;
 }
 
-static void xdkSetTrackPosition(AudioSystem* audio, int32_t soundOrInstance, float positionSeconds) {
+static float xdkGetTrackPosition(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    XdkSoundInstance* inst = findById(xa, soundOrInstance);
+    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE)
+        return xdkInstanceTrackPosition(findById(xa, soundOrInstance));
+
+    if (soundOrInstance < 0) return 0.0f;
+    XdkInstanceArray* arr = Instances(xa);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        XdkSoundInstance* inst = &arr->instances[i];
+        if (inst->active && inst->soundIndex == soundOrInstance)
+            return xdkInstanceTrackPosition(inst);
+    }
+    return 0.0f;
+}
+
+static void xdkSeekInstance(XdkSoundInstance* inst, float positionSeconds) {
     if (!inst || !inst->pVoice || !inst->pcmData || inst->sampleRate == 0 ||
         inst->channels == 0 || !(positionSeconds >= 0.0f) || positionSeconds > FLT_MAX) return;
 
     uint32_t totalFrames = inst->pcmSize / ((uint32_t)inst->channels * sizeof(short));
     if (totalFrames == 0) return;
-    float duration = (float)totalFrames / (float)inst->sampleRate;
-    if (inst->loop && positionSeconds >= duration)
-        positionSeconds = fmodf(positionSeconds, duration);
 
-    uint32_t offset = (uint32_t)(positionSeconds * (float)inst->sampleRate);
-    if (offset >= totalFrames) {
-        if (inst->loop) offset = 0;
-        else offset = totalFrames;
+    // Use double precision for the seconds-to-frame conversion. A finite float
+    // timestamp multiplied by sampleRate can overflow float before it is clamped.
+    double requestedFrame = (double)positionSeconds * (double)inst->sampleRate;
+    uint32_t offset;
+    if (inst->loop) {
+        offset = (uint32_t)fmod(requestedFrame, (double)totalFrames);
+    } else {
+        offset = requestedFrame >= (double)totalFrames
+            ? totalFrames : (uint32_t)requestedFrame;
     }
 
     HRESULT hr = inst->pVoice->Stop(0);
     if (FAILED(hr)) return;
     hr = inst->pVoice->FlushSourceBuffers();
-    if (FAILED(hr)) return;
+    if (FAILED(hr)) {
+        DbgPrint("BS: seek FlushSourceBuffers failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+        return;
+    }
 
     XAUDIO2_VOICE_STATE state;
     inst->pVoice->GetState(&state, 0);
@@ -907,6 +923,24 @@ static void xdkSetTrackPosition(AudioSystem* audio, int32_t soundOrInstance, flo
             DbgPrint("BS: seek Start failed: hr=0x%08X\n", (unsigned)hr);
             destroyInstance(inst);
         }
+    }
+}
+
+static void xdkSetTrackPosition(AudioSystem* audio, int32_t soundOrInstance, float positionSeconds) {
+    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
+    if (!(positionSeconds >= 0.0f) || positionSeconds > FLT_MAX) return;
+
+    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+        xdkSeekInstance(findById(xa, soundOrInstance), positionSeconds);
+        return;
+    }
+    if (soundOrInstance < 0) return;
+
+    XdkInstanceArray* arr = Instances(xa);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        XdkSoundInstance* inst = &arr->instances[i];
+        if (inst->active && inst->soundIndex == soundOrInstance)
+            xdkSeekInstance(inst, positionSeconds);
     }
 }
 
