@@ -72,7 +72,7 @@ static inline void bgrToFloatColor(uint32_t bgr, float alpha, float* outR, float
 // ===[ Batch Flush ]===
 
 static void flushBatch(D3D9Renderer* dr) {
-    if (dr->quadCount == 0) return;
+    if (!dr || !dr->vertexData || !dr->pd3dDevice || dr->quadCount == 0) return;
 
     IDirect3DDevice9* dev = Dev(dr);
 
@@ -124,9 +124,15 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     IDirect3DDevice9* dev = Dev(dr);
     renderer->dataWin = dataWin;
+    dr->initialized = false;
+    if (!dev || !dataWin) return;
 
     // Allocate CPU vertex staging buffer
     dr->vertexData = (uint8_t*)malloc(D3D9_MAX_QUADS * D3D9_VERTS_PER_QUAD * sizeof(SpriteVertex));
+    if (!dr->vertexData) {
+        OutputDebugStringA("D3D9: vertex staging allocation failed\n");
+        return;
+    }
 
     // Compile shaders from source
     ID3DXBuffer* pCode = NULL;
@@ -140,9 +146,13 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         if (pErr) pErr->Release();
         return;
     }
-    dev->CreateVertexShader((const DWORD*)pCode->GetBufferPointer(),
-                            (IDirect3DVertexShader9**)&dr->pVertexShader);
+    hr = dev->CreateVertexShader((const DWORD*)pCode->GetBufferPointer(),
+                                 (IDirect3DVertexShader9**)&dr->pVertexShader);
     pCode->Release();
+    if (FAILED(hr) || !dr->pVertexShader) {
+        OutputDebugStringA("D3D9: CreateVertexShader failed\n");
+        return;
+    }
 
     hr = D3DXCompileShader(g_psSource, (UINT)strlen(g_psSource),
                            NULL, NULL, "main", "ps_2_0", 0, &pCode, &pErr, NULL);
@@ -152,9 +162,13 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         if (pErr) pErr->Release();
         return;
     }
-    dev->CreatePixelShader((const DWORD*)pCode->GetBufferPointer(),
-                           (IDirect3DPixelShader9**)&dr->pPixelShader);
+    hr = dev->CreatePixelShader((const DWORD*)pCode->GetBufferPointer(),
+                                (IDirect3DPixelShader9**)&dr->pPixelShader);
     pCode->Release();
+    if (FAILED(hr) || !dr->pPixelShader) {
+        OutputDebugStringA("D3D9: CreatePixelShader failed\n");
+        return;
+    }
 
     // Create vertex declaration
     static const D3DVERTEXELEMENT9 decl[] = {
@@ -163,24 +177,46 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         { 0, 24, D3DDECLTYPE_FLOAT4, D3DDECLMETHOD_DEFAULT, D3DDECLUSAGE_TEXCOORD, 1 },
         D3DDECL_END()
     };
-    dev->CreateVertexDeclaration(decl, (IDirect3DVertexDeclaration9**)&dr->pVertexDecl);
+    hr = dev->CreateVertexDeclaration(decl, (IDirect3DVertexDeclaration9**)&dr->pVertexDecl);
+    if (FAILED(hr) || !dr->pVertexDecl) {
+        OutputDebugStringA("D3D9: CreateVertexDeclaration failed\n");
+        return;
+    }
 
-    // Create 1x1 white texture for primitives
+    // Create 1x1 white texture for primitives.
     IDirect3DTexture9* whiteTex = NULL;
-    dev->CreateTexture(1, 1, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_DEFAULT, &whiteTex, NULL);
-    if (whiteTex) {
-        D3DLOCKED_RECT lr;
-        whiteTex->LockRect(0, &lr, NULL, 0);
-        *(DWORD*)lr.pBits = 0xFFFFFFFF;
-        whiteTex->UnlockRect(0);
+    hr = dev->CreateTexture(1, 1, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_DEFAULT, &whiteTex, NULL);
+    if (FAILED(hr) || !whiteTex) {
+        OutputDebugStringA("D3D9: white texture creation failed\n");
+        return;
+    }
+    D3DLOCKED_RECT lr;
+    hr = whiteTex->LockRect(0, &lr, NULL, 0);
+    if (FAILED(hr) || !lr.pBits) {
+        whiteTex->Release();
+        OutputDebugStringA("D3D9: white texture lock failed\n");
+        return;
+    }
+    *(DWORD*)lr.pBits = 0xFFFFFFFF;
+    hr = whiteTex->UnlockRect(0);
+    if (FAILED(hr)) {
+        whiteTex->Release();
+        OutputDebugStringA("D3D9: white texture unlock failed\n");
+        return;
     }
     dr->whiteTexture = whiteTex;
 
     // Load TXTR pages: decode PNG to RGBA, upload as D3D textures
     dr->textureCount = dataWin->txtr.count;
-    dr->textures = (void**)calloc(dr->textureCount, sizeof(void*));
-    dr->textureWidths = (int32_t*)calloc(dr->textureCount, sizeof(int32_t));
-    dr->textureHeights = (int32_t*)calloc(dr->textureCount, sizeof(int32_t));
+    if (dr->textureCount > 0) {
+        dr->textures = (void**)calloc(dr->textureCount, sizeof(void*));
+        dr->textureWidths = (int32_t*)calloc(dr->textureCount, sizeof(int32_t));
+        dr->textureHeights = (int32_t*)calloc(dr->textureCount, sizeof(int32_t));
+        if (!dr->textures || !dr->textureWidths || !dr->textureHeights) {
+            OutputDebugStringA("D3D9: texture table allocation failed\n");
+            return;
+        }
+    }
 
     for (uint32_t i = 0; i < dr->textureCount; i++) {
         Texture* txtr = &dataWin->txtr.textures[i];
@@ -199,31 +235,40 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         IDirect3DTexture9* linearTex = NULL;
         IDirect3DTexture9* tex = NULL;
 
-        // Create linear staging texture
-        dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_DEFAULT, &linearTex, NULL);
-        if (linearTex) {
+        // Create and fill the linear texture. Every HRESULT is checked before
+        // dereferencing the returned lock or publishing the texture pointer.
+        HRESULT textureHr = dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8,
+                                               D3DPOOL_DEFAULT, &linearTex, NULL);
+        if (SUCCEEDED(textureHr) && linearTex) {
             D3DLOCKED_RECT lr;
-            linearTex->LockRect(0, &lr, NULL, 0);
-            for (int y2 = 0; y2 < h; y2++) {
-                uint8_t* src = pixels + y2 * w * 4;
-                DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + y2 * lr.Pitch);
-                for (int x2 = 0; x2 < w; x2++) {
-                    uint8_t r = src[x2 * 4 + 0];
-                    uint8_t g = src[x2 * 4 + 1];
-                    uint8_t b = src[x2 * 4 + 2];
-                    uint8_t a = src[x2 * 4 + 3];
-                    // Clear RGB on fully transparent pixels to prevent color bleeding
-                    // from texture filtering sampling adjacent texels
-                    if (a == 0) { r = 0; g = 0; b = 0; }
-                    dst[x2] = D3DCOLOR_ARGB(a, r, g, b);
+            textureHr = linearTex->LockRect(0, &lr, NULL, 0);
+            if (SUCCEEDED(textureHr) && lr.pBits && lr.Pitch >= w * 4) {
+                for (int y2 = 0; y2 < h; y2++) {
+                    uint8_t* src = pixels + y2 * w * 4;
+                    DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + y2 * lr.Pitch);
+                    for (int x2 = 0; x2 < w; x2++) {
+                        uint8_t r = src[x2 * 4 + 0];
+                        uint8_t g = src[x2 * 4 + 1];
+                        uint8_t b = src[x2 * 4 + 2];
+                        uint8_t a = src[x2 * 4 + 3];
+                        if (a == 0) { r = 0; g = 0; b = 0; }
+                        dst[x2] = D3DCOLOR_ARGB(a, r, g, b);
+                    }
                 }
+                textureHr = linearTex->UnlockRect(0);
+                if (SUCCEEDED(textureHr)) {
+                    tex = linearTex;
+                    dr->textures[i] = tex;
+                } else {
+                    linearTex->Release();
+                }
+            } else {
+                linearTex->Release();
             }
-            linearTex->UnlockRect(0);
         }
-
-        // Just use the linear texture directly — Xbox 360 can sample from linear textures
-        tex = linearTex;
-        dr->textures[i] = tex;
+        if (!dr->textures[i]) {
+            DbgPrint("BS: D3D9 texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)textureHr);
+        }
         stbi_image_free(pixels);
     }
 
@@ -233,12 +278,16 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 
     dr->currentTextureIndex = -1;
     dr->quadCount = 0;
+    dr->initialized = true;
+    DbgPrint("BS: D3D9 renderer initialized (%u texture pages)\n", dr->textureCount);
 }
 
 static void d3d9Destroy(Renderer* renderer) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
-    for (uint32_t i = 0; i < dr->textureCount; i++) {
-        if (dr->textures[i]) ((IDirect3DTexture9*)dr->textures[i])->Release();
+    if (dr->textures) {
+        for (uint32_t i = 0; i < dr->textureCount; i++) {
+            if (dr->textures[i]) ((IDirect3DTexture9*)dr->textures[i])->Release();
+        }
     }
     free(dr->textures);
     free(dr->textureWidths);
@@ -254,6 +303,7 @@ static void d3d9Destroy(Renderer* renderer) {
 static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     IDirect3DDevice9* dev = Dev(dr);
+    if (!dr->initialized || !dev || gameW <= 0 || gameH <= 0 || windowW <= 0 || windowH <= 0) return;
 
     dr->gameW = gameW;
     dr->gameH = gameH;
