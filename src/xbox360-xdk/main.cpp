@@ -193,8 +193,13 @@ VOID __cdecl main() {
 
     DbgPrint("BS: creating VM\n");
     VMContext* vm = VM_create(dataWin);
-    DbgPrint("BS: creating runner\n");
-    Runner* runner = Runner_create(dataWin, vm, fileSystem);
+
+    DbgPrint("BS: creating audio system\n");
+    XdkAudioSystem* xdkAudio = XdkAudioSystem_create();
+    AudioSystem* audioSystem = (AudioSystem*)xdkAudio;
+
+    DbgPrint("BS: creating modern runner\n");
+    Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, 0);
 
     // Parse CONFIG.JSN options
     if (configRoot) {
@@ -226,20 +231,7 @@ VOID __cdecl main() {
 
     if (!xpadMappings) setupDefaultMappings();
 
-    runner->renderer = renderer;
-
-    // Initialize audio
-    DbgPrint("BS: creating audio\n");
-    XdkAudioSystem* xdkAudio = XdkAudioSystem_create();
-    AudioSystem* audioSystem = (AudioSystem*)xdkAudio;
-    audioSystem->vtable->init(audioSystem, dataWin, fileSystem);
-    runner->audioSystem = audioSystem;
-    DbgPrint("BS: audio OK\n");
-
-    // Initialize renderer
-    DbgPrint("BS: init renderer\n");
-    renderer->vtable->init(renderer, dataWin);
-    DbgPrint("BS: renderer OK\n");
+    // Runner_create owns renderer/audio initialization in the modern runtime.
 
     // Initialize first room
     DbgPrint("BS: init first room\n");
@@ -251,16 +243,13 @@ VOID __cdecl main() {
     int32_t gameH = (int32_t)gen8->defaultWindowHeight;
     DbgPrint("BS: gameW=%d gameH=%d screenW=%d screenH=%d\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    // Parse deferDrawToAfterAllSteps
-    bool deferDraw = false;
-    if (configRoot) {
-        JsonValue* deferVal = JsonReader_getObject(configRoot, "deferDrawToAfterAllSteps");
-        if (deferVal) deferDraw = JsonReader_getBool(deferVal);
-    }
+    Gen8* gen8 = &dataWin->gen8;
+    int32_t gameW = (int32_t)gen8->defaultWindowWidth;
+    int32_t gameH = (int32_t)gen8->defaultWindowHeight;
+    DbgPrint("BS: gameW=%d gameH=%d screenW=%d screenH=%d\\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    DbgPrint("BS: entering main loop\n");
+    DbgPrint("BS: entering modern main loop\\n");
 
-    // ===[ Main Loop ]===
     LARGE_INTEGER freq, lastTime, currentTime;
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&lastTime);
@@ -270,42 +259,44 @@ VOID __cdecl main() {
         QueryPerformanceCounter(&currentTime);
         double deltaTime = (double)(currentTime.QuadPart - lastTime.QuadPart) / (double)freq.QuadPart;
         lastTime = currentTime;
+        if (deltaTime < 0.0) deltaTime = 0.0;
+        if (deltaTime > 0.25) deltaTime = 0.25;
 
-        // ===[ Poll Controller ]===
+        // Poll XInput. Treat a disconnected controller as neutral so keys do not stick.
         XINPUT_STATE state;
+        memset(&state, 0, sizeof(state));
+        WORD buttons = 0;
         if (XInputGetState(0, &state) == ERROR_SUCCESS) {
-            WORD buttons = state.Gamepad.wButtons;
+            buttons = state.Gamepad.wButtons;
 
-            // Left thumbstick as dpad
-            #define STICK_DEADZONE 16384
+            const SHORT deadzone = 16384;
             SHORT lx = state.Gamepad.sThumbLX;
             SHORT ly = state.Gamepad.sThumbLY;
-            if (lx < -STICK_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_LEFT;
-            if (lx >  STICK_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_RIGHT;
-            if (ly >  STICK_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_UP;
-            if (ly < -STICK_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_DOWN;
-
-            for (int i = 0; i < xpadMappingCount; i++) {
-                WORD mask = xpadMappings[i].xpadButton;
-                int32_t gmlKey = xpadMappings[i].gmlKey;
-
-                bool wasPressed = (prevButtons & mask) != 0;
-                bool isPressed = (buttons & mask) != 0;
-
-                if (isPressed && !wasPressed)
-                    RunnerKeyboard_onKeyDown(runner->keyboard, gmlKey);
-                else if (!isPressed && wasPressed)
-                    RunnerKeyboard_onKeyUp(runner->keyboard, gmlKey);
-            }
-            prevButtons = buttons;
+            if (lx < -deadzone) buttons |= XINPUT_GAMEPAD_DPAD_LEFT;
+            if (lx >  deadzone) buttons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+            if (ly >  deadzone) buttons |= XINPUT_GAMEPAD_DPAD_UP;
+            if (ly < -deadzone) buttons |= XINPUT_GAMEPAD_DPAD_DOWN;
             prevRightTrigger = state.Gamepad.bRightTrigger;
+        } else {
+            prevRightTrigger = 0;
         }
 
-        bool speedCapRemoved = prevRightTrigger > 128;
+        for (int i = 0; i < xpadMappingCount; i++) {
+            WORD mask = xpadMappings[i].xpadButton;
+            int32_t gmlKey = xpadMappings[i].gmlKey;
+            bool wasPressed = (prevButtons & mask) != 0;
+            bool isPressed = (buttons & mask) != 0;
 
-        // ===[ Frame Pacing ]===
-        uint32_t roomSpeed = runner->currentRoom->speed;
-        double targetFrameTime = (roomSpeed > 0) ? (1.0 / roomSpeed) : (1.0 / 60.0);
+            if (isPressed && !wasPressed)
+                RunnerKeyboard_onKeyDown(runner->keyboard, gmlKey);
+            else if (!isPressed && wasPressed)
+                RunnerKeyboard_onKeyUp(runner->keyboard, gmlKey);
+        }
+        prevButtons = buttons;
+
+        bool speedCapRemoved = prevRightTrigger > 128;
+        double gameSpeed = (double)Runner_getEffectiveGameSpeed(runner);
+        double targetFrameTime = gameSpeed > 0.0 ? (1.0 / gameSpeed) : (1.0 / 60.0);
 
         accumulator += deltaTime;
         double maxAccumulator = targetFrameTime * 4.0;
@@ -313,107 +304,59 @@ VOID __cdecl main() {
         if (speedCapRemoved && targetFrameTime > accumulator) accumulator = targetFrameTime;
 
         int gameFramesRan = 0;
-        while (accumulator >= targetFrameTime) {
-            if (gameFramesRan > 0)
-                RunnerKeyboard_beginFrame(runner->keyboard);
-
+        while (accumulator >= targetFrameTime && !runner->shouldExit) {
+            if (gameFramesRan > 0) RunnerKeyboard_beginFrame(runner->keyboard);
             Runner_step(runner);
-
-            if (!deferDraw) {
-                renderer->vtable->beginFrame(renderer, gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
-
-                Room* activeRoom = runner->currentRoom;
-                bool anyViewRendered = false;
-                bool viewsEnabled = (activeRoom->flags & 1) != 0;
-
-                if (viewsEnabled) {
-                    for (int vi = 0; vi < 8; vi++) {
-                        if (!activeRoom->views[vi].enabled) continue;
-                        runner->viewCurrent = vi;
-                        renderer->vtable->beginView(renderer,
-                            activeRoom->views[vi].viewX, activeRoom->views[vi].viewY,
-                            activeRoom->views[vi].viewWidth, activeRoom->views[vi].viewHeight,
-                            activeRoom->views[vi].portX, activeRoom->views[vi].portY,
-                            activeRoom->views[vi].portWidth, activeRoom->views[vi].portHeight,
-                            runner->viewAngles[vi]);
-                        Runner_draw(runner);
-                        renderer->vtable->endView(renderer);
-                        anyViewRendered = true;
-                    }
-                }
-
-                if (!anyViewRendered) {
-                    runner->viewCurrent = 0;
-                    renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
-                    Runner_draw(runner);
-                    renderer->vtable->endView(renderer);
-                }
-
-                runner->viewCurrent = 0;
-                renderer->vtable->endFrame(renderer);
-            }
-
             accumulator -= targetFrameTime;
             gameFramesRan++;
         }
 
-        // Deferred draw: render once after all catch-up steps
-        if (deferDraw && gameFramesRan > 0) {
-            renderer->vtable->beginFrame(renderer, gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
+        // Render once after catch-up steps. This follows the modern renderer lifecycle:
+        // draw-pre -> application surface/views -> draw-post -> GUI -> present.
+        if (gameFramesRan > 0 && !runner->shouldExit) {
+            gameW = runner->applicationWidth > 0 ? runner->applicationWidth : (int32_t)gen8->defaultWindowWidth;
+            gameH = runner->applicationHeight > 0 ? runner->applicationHeight : (int32_t)gen8->defaultWindowHeight;
 
-            Room* activeRoom = runner->currentRoom;
-            bool anyViewRendered = false;
-            bool viewsEnabled = (activeRoom->flags & 1) != 0;
+            Runner_drawPre(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
+            Runner_beginFrame(runner, gameW, gameH,
+                              SCREEN_WIDTH, SCREEN_HEIGHT,
+                              SCREEN_WIDTH, SCREEN_HEIGHT);
+            Runner_drawViews(runner, gameW, gameH, false);
+            renderer->vtable->endFrameInit(renderer);
+            Runner_drawPost(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
+            renderer->vtable->endFrameEnd(renderer);
+            Runner_drawGUI(runner, SCREEN_WIDTH, SCREEN_HEIGHT, gameW, gameH);
 
-            if (viewsEnabled) {
-                for (int vi = 0; vi < 8; vi++) {
-                    if (!activeRoom->views[vi].enabled) continue;
-                    runner->viewCurrent = vi;
-                    renderer->vtable->beginView(renderer,
-                        activeRoom->views[vi].viewX, activeRoom->views[vi].viewY,
-                        activeRoom->views[vi].viewWidth, activeRoom->views[vi].viewHeight,
-                        activeRoom->views[vi].portX, activeRoom->views[vi].portY,
-                        activeRoom->views[vi].portWidth, activeRoom->views[vi].portHeight,
-                        runner->viewAngles[vi]);
-                    Runner_draw(runner);
-                    renderer->vtable->endView(renderer);
-                    anyViewRendered = true;
-                }
-            }
-
-            if (!anyViewRendered) {
-                runner->viewCurrent = 0;
-                renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
-                Runner_draw(runner);
-                renderer->vtable->endView(renderer);
-            }
-
-            runner->viewCurrent = 0;
-            renderer->vtable->endFrame(renderer);
-        }
-
-        // Update audio
-        if (runner->audioSystem) {
-            float dt = (float)deltaTime;
-            if (dt < 0.0f) dt = 0.0f;
-            if (dt > 0.1f) dt = 0.1f;
-            runner->audioSystem->vtable->update(runner->audioSystem, dt);
-        }
-
-        if (gameFramesRan > 0) {
+            Runner_handlePendingRoomChange(runner);
             RunnerKeyboard_beginFrame(runner->keyboard);
+        }
+
+        if (audioSystem && audioSystem->vtable && audioSystem->vtable->update) {
+            float audioDelta = (float)deltaTime;
+            if (audioDelta > 0.1f) audioDelta = 0.1f;
+            audioSystem->vtable->update(audioSystem, audioDelta);
+        }
+
+        // Avoid a full-speed busy loop when the room speed is low.
+        if (!speedCapRemoved && accumulator < targetFrameTime) {
+            DWORD sleepMs = (DWORD)((targetFrameTime - accumulator) * 1000.0);
+            if (sleepMs > 0) Sleep(sleepMs > 2 ? sleepMs - 1 : sleepMs);
         }
     }
 
     // ===[ Cleanup ]===
-    if (runner->audioSystem) {
+    DbgPrint("BS: shutting down runner\\n");
+    if (runner && runner->audioSystem) {
         runner->audioSystem->vtable->destroy(runner->audioSystem);
         runner->audioSystem = NULL;
     }
-    renderer->vtable->destroy(renderer);
+    if (renderer) renderer->vtable->destroy(renderer);
+    Runner_free(runner);
+    VM_free(vm);
     DataWin_free(dataWin);
-    pd3dDevice->Release();
-    pD3D->Release();
+    free(xdkFs);
 
+    if (pd3dDevice) pd3dDevice->Release();
+    if (pD3D) pD3D->Release();
     free(xpadMappings);
 }
