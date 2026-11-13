@@ -2153,8 +2153,10 @@ static void readRoomLayers(BinaryReader* reader, DataWin* dw, Room* room) {
                 break;
             }
             default: {
-                logError("Unsupported Room Layer Type %u\n", layer->type);
-                exit(0);
+                // Layer payloads are addressed independently through layerPtrs,
+                // so an unknown type can be skipped without terminating the title.
+                logWarn("Unsupported Room Layer Type %u; skipping its payload\n", layer->type);
+                break;
             }
         }
     }
