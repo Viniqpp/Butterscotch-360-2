@@ -14,6 +14,7 @@ extern "C" ULONG __cdecl DbgPrint(const char* format, ...);
 // Core headers — compiled as C++ alongside the .c files (via /TP flag)
 #include "runner.h"
 #include "runner_keyboard.h"
+#include "runner_gamepad.h"
 #include "vm.h"
 #include "data_win.h"
 #include "json_reader.h"
@@ -67,6 +68,77 @@ static void setupDefaultMappings(void) {
     xpadMappingCount = sizeof(defaults) / sizeof(XpadMapping);
     xpadMappings = (XpadMapping*)malloc(sizeof(defaults));
     memcpy(xpadMappings, defaults, sizeof(defaults));
+}
+
+static float xdkNormalizeStick(SHORT value) {
+    return value < 0 ? (float)value / 32768.0f : (float)value / 32767.0f;
+}
+
+// Publish the physical XInput state through the modern RunnerGamepad API as
+// well as the legacy keyboard mappings below. Edge transitions are generated
+// once per simulated game frame, not once per outer polling iteration.
+static void updateNativeGamepad(Runner* runner, const XINPUT_GAMEPAD* pad, bool connected) {
+    if (!runner || !runner->gamepads) return;
+    RunnerGamepadState* state = runner->gamepads;
+    bool previous[GP_BUTTON_COUNT];
+    for (int i = 0; i < GP_BUTTON_COUNT; i++)
+        previous[i] = state->slots[0].buttonDown[i];
+
+    RunnerGamepad_beginFrame(state);
+    GamepadSlot* slot = &state->slots[0];
+    for (int i = 0; i < GP_BUTTON_COUNT; i++)
+        slot->buttonDownPrev[i] = previous[i];
+
+    slot->connected = connected;
+    if (connected && pad) {
+        slot->jid = 0;
+        strcpy(slot->description, "Xbox 360 Controller");
+        strcpy(slot->guid, "xinput:0");
+
+        bool down[GP_BUTTON_COUNT] = { false };
+        float values[GP_BUTTON_COUNT] = { 0.0f };
+        down[0] = (pad->wButtons & XINPUT_GAMEPAD_A) != 0;
+        down[1] = (pad->wButtons & XINPUT_GAMEPAD_B) != 0;
+        down[2] = (pad->wButtons & XINPUT_GAMEPAD_X) != 0;
+        down[3] = (pad->wButtons & XINPUT_GAMEPAD_Y) != 0;
+        down[6] = (pad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
+        down[7] = (pad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
+        down[8] = (pad->wButtons & XINPUT_GAMEPAD_BACK) != 0;
+        down[9] = (pad->wButtons & XINPUT_GAMEPAD_START) != 0;
+        down[10] = (pad->wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
+        down[11] = (pad->wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
+        down[12] = (pad->wButtons & XINPUT_GAMEPAD_DPAD_UP) != 0;
+        down[13] = (pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
+        down[14] = (pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
+        down[15] = (pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
+
+        values[4] = (float)pad->bLeftTrigger / 255.0f;
+        values[5] = (float)pad->bRightTrigger / 255.0f;
+        down[4] = values[4] >= slot->triggerThreshold;
+        down[5] = values[5] >= slot->triggerThreshold;
+        for (int i = 0; i < GP_BUTTON_COUNT; i++) {
+            if (i != 4 && i != 5) values[i] = down[i] ? 1.0f : 0.0f;
+        }
+
+        slot->axisValue[0] = xdkNormalizeStick(pad->sThumbLX);
+        slot->axisValue[1] = -xdkNormalizeStick(pad->sThumbLY);
+        slot->axisValue[2] = xdkNormalizeStick(pad->sThumbRX);
+        slot->axisValue[3] = -xdkNormalizeStick(pad->sThumbRY);
+        for (int i = 0; i < GP_BUTTON_COUNT; i++) {
+            slot->buttonDown[i] = down[i];
+            slot->buttonValue[i] = values[i];
+            slot->buttonPressed[i] = down[i] && !previous[i];
+            slot->buttonReleased[i] = !down[i] && previous[i];
+        }
+        state->connectedCount = 1;
+    } else {
+        memset(slot->buttonDown, 0, sizeof(slot->buttonDown));
+        memset(slot->buttonValue, 0, sizeof(slot->buttonValue));
+        memset(slot->axisValue, 0, sizeof(slot->axisValue));
+        slot->description[0] = '\0';
+        slot->guid[0] = '\0';
+        state->connectedCount = 0;
+    }
 }
 
 // Mirrors the modern platformSwapBuffers() hook: finish the D3D scene only
@@ -317,7 +389,8 @@ VOID __cdecl main() {
         XINPUT_STATE state;
         memset(&state, 0, sizeof(state));
         WORD buttons = 0;
-        if (XInputGetState(0, &state) == ERROR_SUCCESS) {
+        bool controllerConnected = XInputGetState(0, &state) == ERROR_SUCCESS;
+        if (controllerConnected) {
             buttons = state.Gamepad.wButtons;
 
             const SHORT deadzone = 16384;
@@ -357,6 +430,7 @@ VOID __cdecl main() {
         int gameFramesRan = 0;
         while (accumulator >= targetFrameTime && !runner->shouldExit) {
             if (gameFramesRan > 0) RunnerKeyboard_beginFrame(runner->keyboard);
+            updateNativeGamepad(runner, &state.Gamepad, controllerConnected);
             Runner_step(runner);
             accumulator -= targetFrameTime;
             gameFramesRan++;
