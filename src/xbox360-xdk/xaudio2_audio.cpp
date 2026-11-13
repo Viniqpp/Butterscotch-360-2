@@ -85,7 +85,7 @@ static XdkSoundInstance* findById(XdkAudioSystem* xa, int32_t id) {
 // Allocate monotonically increasing public IDs rather than deriving them from
 // reusable instance slots. Wrap safely while avoiding IDs held by active voices.
 static int32_t allocateInstanceId(XdkAudioSystem* xa) {
-    const int32_t maxCounter = XDK_AUDIO_STREAM_INDEX_BASE - XDK_SOUND_INSTANCE_ID_BASE;
+    const int32_t maxCounter = XDK_AUDIO_STREAM_INDEX_BASE - XDK_SOUND_INSTANCE_ID_BASE - 1;
     XdkInstanceArray* arr = Instances(xa);
     for (int attempt = 0; attempt <= XDK_MAX_SOUND_INSTANCES; attempt++) {
         if (xa->nextInstanceCounter < 0 || xa->nextInstanceCounter >= maxCounter)
