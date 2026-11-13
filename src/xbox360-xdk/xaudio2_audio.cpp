@@ -8,6 +8,7 @@
 
 #define XDK_MAX_ENCODED_AUDIO_BYTES (32u * 1024u * 1024u)
 #define XDK_MAX_ACTIVE_PCM_BYTES (96u * 1024u * 1024u)
+#define XDK_MAX_AUDIO_SAMPLE_RATE 192000u
 
 // stb_vorbis on big-endian Xbox 360:
 // Disable the fast float-to-int path which has endian assumptions.
@@ -527,7 +528,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         if (offset != riffEnd) malformedChunk = true;
 
         if (malformedChunk || !haveFmt || !haveData || formatTag != 1 || bitsPerSample != 16 ||
-            wavChannels == 0 || wavChannels > 2 || wavRate == 0 ||
+            wavChannels == 0 || wavChannels > 2 || wavRate == 0 || wavRate > XDK_MAX_AUDIO_SAMPLE_RATE ||
             blockAlign != (uint16_t)(wavChannels * 2) ||
             dataOffset > (size_t)oggSize || dataSize > (size_t)oggSize - dataOffset ||
             dataSize == 0 || (dataSize % blockAlign) != 0 ||
@@ -573,7 +574,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         int totalSamples = stb_vorbis_stream_length_in_samples(vorbis);
         channels = info.channels;
         sampleRate = (int)info.sample_rate;
-        if (channels <= 0 || channels > 2 || sampleRate <= 0 || totalSamples <= 0 ||
+        if (channels <= 0 || channels > 2 || sampleRate <= 0 || sampleRate > (int)XDK_MAX_AUDIO_SAMPLE_RATE || totalSamples <= 0 ||
             (unsigned long long)totalSamples * (unsigned long long)channels * sizeof(short) > 0x7fffffffULL) {
             stb_vorbis_close(vorbis);
             if (freeOggData) free(oggData);
@@ -1255,7 +1256,7 @@ static float xdkMeasureAudioBytes(const uint8_t* data, uint32_t bytes) {
         }
         if (offset != riffEnd || !haveFmt || !haveData || formatTag != 1 ||
             bitsPerSample != 16 || channels == 0 || channels > 2 ||
-            sampleRate == 0 || blockAlign != channels * 2 ||
+            sampleRate == 0 || sampleRate > XDK_MAX_AUDIO_SAMPLE_RATE || blockAlign != channels * 2 ||
             dataSize == 0 || dataSize % blockAlign != 0) return 0.0f;
         return (float)(dataSize / blockAlign) / (float)sampleRate;
     }
@@ -1265,7 +1266,7 @@ static float xdkMeasureAudioBytes(const uint8_t* data, uint32_t bytes) {
     if (!vorbis) return 0.0f;
     stb_vorbis_info info = stb_vorbis_get_info(vorbis);
     unsigned int frames = stb_vorbis_stream_length_in_samples(vorbis);
-    float duration = info.sample_rate > 0 && frames > 0
+    float duration = info.sample_rate > 0 && info.sample_rate <= XDK_MAX_AUDIO_SAMPLE_RATE && frames > 0
         ? (float)frames / (float)info.sample_rate : 0.0f;
     stb_vorbis_close(vorbis);
     return duration;
@@ -1420,7 +1421,7 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
 
     stb_vorbis_info info = stb_vorbis_get_info(vorbis);
     unsigned int totalSamples = stb_vorbis_stream_length_in_samples(vorbis);
-    if (info.channels < 1 || info.channels > 2 || info.sample_rate == 0 ||
+    if (info.channels < 1 || info.channels > 2 || info.sample_rate == 0 || info.sample_rate > XDK_MAX_AUDIO_SAMPLE_RATE ||
         totalSamples == 0 || totalSamples > (unsigned int)(0x7fffffff / (info.channels * (int)sizeof(short)))) {
         stb_vorbis_close(vorbis);
         DbgPrint("BS: playEncoded unsupported stream metadata\n");
