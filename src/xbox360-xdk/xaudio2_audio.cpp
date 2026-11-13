@@ -1336,6 +1336,8 @@ static int32_t xdkCreateStream(AudioSystem* audio, const char* filename) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (!xa || !xa->initialized || !xa->fileSystem || !filename || !filename[0]) return -1;
 
+    // Keep stream creation cheap: resolve and retain the path. The current
+    // playback backend decodes the file into bounded PCM when playSound runs.
     int32_t slot = -1;
     for (int32_t i = 0; i < XDK_MAX_AUDIO_STREAMS; i++) {
         if (!xa->streams[i].active) { slot = i; break; }
