@@ -243,9 +243,9 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
             DbgPrint("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
             continue;
         }
-        int expectedW = 0, expectedH = 0, expectedChannels = 0;
+        int expectedW = 0, expectedH = 0;
         if (!stbi_info_from_memory(txtr->blobData, (int)txtr->blobSize,
-                                   &expectedW, &expectedH, &expectedChannels)) {
+                                   &expectedW, &expectedH, NULL)) {
             DbgPrint("BS: could not inspect TXTR page %u before decode\n", i);
             continue;
         }
@@ -257,8 +257,8 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
             continue;
         }
 
-        int w = 0, h = 0, channels = 0;
-        uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int)txtr->blobSize, &w, &h, &channels, 4);
+        int w = 0, h = 0;
+        uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int)txtr->blobSize, &w, &h, NULL, 4);
         if (!pixels) {
             OutputDebugStringA("Failed to decode TXTR page\n");
             continue;
