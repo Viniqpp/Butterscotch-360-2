@@ -58,7 +58,7 @@
 <IntrinsicFunctions>true</IntrinsicFunctions>
 <ForceConformanceInForLoopScope>true</ForceConformanceInForLoopScope>
 <PreprocessorDefinitions>_DEBUG;_XBOX;XBOX;USE_STB_IMGDEC;ENABLE_WAD14;ENABLE_WAD16;ENABLE_WAD17;ENABLE_FMOD;BUTTERSCOTCH_VIDEO_NULL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-<AdditionalIncludeDirectories>src;src\xbox360-xdk;vendor\stb\ds;vendor\stb\image;vendor\stb\vorbis;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+<AdditionalIncludeDirectories>src;src\\xbox360-xdk;src\\image;src\\fmod;vendor\\stb\\ds;vendor\\stb\\image;vendor\\stb\\vorbis;vendor\\base64;vendor\\bzip2;vendor\\md5;vendor\\miniz;vendor\\sha1;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
 <AdditionalOptions>/MP %(AdditionalOptions)</AdditionalOptions>
 <ForcedIncludeFiles>compat_msvc.h</ForcedIncludeFiles>
 <CompileAs>CompileAsCpp</CompileAs>
@@ -92,7 +92,7 @@
 <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
 <ForceConformanceInForLoopScope>true</ForceConformanceInForLoopScope>
 <PreprocessorDefinitions>NDEBUG;_XBOX;XBOX;USE_STB_IMGDEC;ENABLE_WAD14;ENABLE_WAD16;ENABLE_WAD17;ENABLE_FMOD;BUTTERSCOTCH_VIDEO_NULL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-<AdditionalIncludeDirectories>src;src\xbox360-xdk;vendor\stb\ds;vendor\stb\image;vendor\stb\vorbis;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+<AdditionalIncludeDirectories>src;src\\xbox360-xdk;src\\image;src\\fmod;vendor\\stb\\ds;vendor\\stb\\image;vendor\\stb\\vorbis;vendor\\base64;vendor\\bzip2;vendor\\md5;vendor\\miniz;vendor\\sha1;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
 <AdditionalOptions>/MP %(AdditionalOptions)</AdditionalOptions>
 <ForcedIncludeFiles>compat_msvc.h</ForcedIncludeFiles>
 <CompileAs>CompileAsCpp</CompileAs>
