@@ -341,33 +341,36 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             destroyInstance(inst);
             return -1;
         }
-        bool hasExt = (strchr(file, '.') != NULL);
+        // Detect extensions on the filename component, not a dotted parent directory.
+        const char* fileName = file;
+        const char* slash = strrchr(file, '/');
+        const char* backslash = strrchr(file, '\\');
+        if (slash && slash + 1 > fileName) fileName = slash + 1;
+        if (backslash && backslash + 1 > fileName) fileName = backslash + 1;
+        bool hasExt = strchr(fileName, '.') != NULL;
+        size_t fileLen = strlen(file);
+        size_t extensionLen = hasExt ? 0 : 4;
+        if (fileLen + extensionLen >= 512) {
+            DbgPrint("BS: external audio path is too long\n");
+            destroyInstance(inst);
+            return -1;
+        }
         char filename[512];
-        if (hasExt) snprintf(filename, sizeof(filename), "%s", file);
-        else snprintf(filename, sizeof(filename), "%s.ogg", file);
+        memcpy(filename, file, fileLen);
+        if (!hasExt) memcpy(filename + fileLen, ".ogg", 5);
+        else filename[fileLen] = '\0';
 
-        char* fullPath = xa->fileSystem->vtable->resolvePath(xa->fileSystem, filename);
-        if (!fullPath) { DbgPrint("BS: could not resolve path for %s\n", filename); destroyInstance(inst);
-            return -1; }
-        DbgPrint("BS: loading external audio: %s\n", fullPath);
-        FILE* f = fopen(fullPath, "rb");
-        free(fullPath);
-        if (!f) { DbgPrint("BS: fopen failed for external audio\n"); destroyInstance(inst);
-            return -1; }
-        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); destroyInstance(inst); return -1; }
-        long fileLength = ftell(f);
-        if (fileLength <= 0 || fileLength > (long)XDK_MAX_ENCODED_AUDIO_BYTES ||
-            fseek(f, 0, SEEK_SET) != 0) {
-            fclose(f); destroyInstance(inst); return -1;
+        int32_t binarySize = 0;
+        if (!xa->fileSystem->vtable->readFileBinary(
+                xa->fileSystem, filename, &oggData, &binarySize) ||
+            !oggData || binarySize <= 0 ||
+            (uint32_t)binarySize > XDK_MAX_ENCODED_AUDIO_BYTES) {
+            if (oggData) free(oggData);
+            DbgPrint("BS: FileSystem could not read external audio %s\n", filename);
+            destroyInstance(inst);
+            return -1;
         }
-        oggSize = (int)fileLength;
-        oggData = (uint8_t*)malloc((size_t)oggSize);
-        if (!oggData) { fclose(f); destroyInstance(inst); return -1; }
-        size_t bytesRead = fread(oggData, 1, (size_t)oggSize, f);
-        fclose(f);
-        if (bytesRead != (size_t)oggSize) {
-            free(oggData); destroyInstance(inst); return -1;
-        }
+        oggSize = binarySize;
         freeOggData = true;
     }
 
