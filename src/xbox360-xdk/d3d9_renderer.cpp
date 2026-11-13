@@ -1441,7 +1441,7 @@ static void d3d9ClearScreen(Renderer* r, uint32_t color, float alpha) {
     bgrToFloatColor(color, alpha, &cr, &cg, &cb, &ca);
     DWORD packed = D3DCOLOR_ARGB((DWORD)(ca * 255.0f), (DWORD)(cr * 255.0f),
                                   (DWORD)(cg * 255.0f), (DWORD)(cb * 255.0f));
-    Dev((D3D9Renderer*)r)->Clear(0, NULL, D3DCLEAR_TARGET, packed, 1.0f, 0);
+    Dev((D3D9Renderer*)r)->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, packed, 1.0f, 0);
 }
 
 // Populate by field name. The modern contract has grown substantially; a
