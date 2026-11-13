@@ -188,6 +188,7 @@ static void xdkAudioUpdate(AudioSystem* audio, float deltaTime) {
 }
 
 static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex);
+static bool xdkGroupIsLoaded(AudioSystem* audio, int32_t groupIndex);
 
 
 // Read little-endian WAV fields without alignment or signed-shift assumptions.
