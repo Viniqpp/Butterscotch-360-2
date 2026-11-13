@@ -146,6 +146,11 @@ static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
     }
 }
 
+static bool xdkCanAllocatePcm(XdkAudioSystem* xa, size_t bytes) {
+    return xa && bytes > 0 && bytes <= xa->maxPcmBytes &&
+           xa->activePcmBytes <= xa->maxPcmBytes - (uint32_t)bytes;
+}
+
 // ===[ Vtable Implementations ]===
 
 static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSystem) {
@@ -489,6 +494,13 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             return -1;
         }
 
+        if (!xdkCanAllocatePcm(xa, dataSize)) {
+            DbgPrint("BS: WAV PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
+                     dataSize, xa->activePcmBytes, xa->maxPcmBytes);
+            if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
+        }
         channels = (int)wavChannels;
         sampleRate = (int)wavRate;
         sampleCount = (int)(dataSize / blockAlign);
@@ -525,6 +537,14 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             return -1;
         }
         size_t pcmBytes = (size_t)totalSamples * (size_t)channels * sizeof(short);
+        if (!xdkCanAllocatePcm(xa, pcmBytes)) {
+            DbgPrint("BS: OGG PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
+                     (unsigned)pcmBytes, xa->activePcmBytes, xa->maxPcmBytes);
+            stb_vorbis_close(vorbis);
+            if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
+        }
         pcm = (short*)malloc(pcmBytes);
         if (!pcm) {
             stb_vorbis_close(vorbis);
@@ -1042,6 +1062,11 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
     }
 
     size_t pcmCapacity = (size_t)totalSamples * (size_t)info.channels * sizeof(short);
+    if (!xdkCanAllocatePcm(xa, pcmCapacity)) {
+        stb_vorbis_close(vorbis);
+        DbgPrint("BS: encoded PCM exceeds active memory budget before allocation\n");
+        return -1;
+    }
     short* pcm = (short*)malloc(pcmCapacity);
     if (!pcm) {
         stb_vorbis_close(vorbis);
