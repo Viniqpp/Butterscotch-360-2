@@ -113,9 +113,12 @@ with the independent D3D9 audit, to avoid conflicting edits.
 **Initial integration committed.** The XDK entry point now uses the modern
 `Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, seed)` signature
 and the modern frame sequence (`Runner_drawPre`, `Runner_beginFrame`,
-`Runner_drawViews`, draw-post and GUI passes). XInput-to-keyboard mappings are
-retained, with disconnected-controller state cleared. WAD 17 TGIN parsing is
-enabled. Timing and room-transition behavior still require runtime testing.
+`Runner_drawViews`, draw-post and GUI passes). A platform swap helper now calls
+`EndScene` and `Present` after the GUI pass, matching upstream's
+`platformSwapBuffers()` placement. A duplicated `Gen8*` local declaration was
+also removed. XInput-to-keyboard mappings are retained, with disconnected-
+controller state cleared. WAD 17 TGIN parsing is enabled. Timing and
+room-transition behavior still require runtime testing.
 
 ### 7. Build and test on the actual toolchain
 
