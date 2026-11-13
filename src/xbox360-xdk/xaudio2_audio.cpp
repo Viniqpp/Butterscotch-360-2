@@ -182,6 +182,8 @@ static void xdkAudioUpdate(AudioSystem* audio, float deltaTime) {
     }
 }
 
+static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex);
+
 static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t priority, bool loop) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (!xa->initialized) { DbgPrint("BS: audio not initialized\n"); return -1; }
@@ -210,12 +212,20 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     Sound* sound = &dw->sond.sounds[soundIndex];
     DbgPrint("BS: playSound idx=%d name=%s flags=0x%x audioFile=%d\n",
         soundIndex, sound->name ? sound->name : "?", (unsigned)sound->flags, sound->audioFile);
-    if (sound->volume >= 0) {
-        inst->sondVolume = sound->volume;
-    }
+    if (sound->volume >= 0) inst->sondVolume = sound->volume;
 
-    // Decode OGG audio — either embedded (AUDO) or external (.ogg file)
-    bool isEmbedded = (sound->flags & 0x01) != 0;
+    int32_t groupIndex = sound->audioGroup < 0 ? 0 : sound->audioGroup;
+    if (groupIndex > 0 && arrlen(audio->audioGroups) <= groupIndex)
+        xdkGroupLoad(audio, groupIndex);
+    DataWin* audioData = (groupIndex >= 0 && arrlen(audio->audioGroups) > groupIndex)
+        ? audio->audioGroups[groupIndex] : dw;
+    if (audioData == NULL) audioData = dw;
+
+    // Modern WAD flags distinguish regular external audio from AUDO data.
+    bool isRegular = (sound->flags & AUDIO_ENTRY_FLAG_REGULAR) == AUDIO_ENTRY_FLAG_REGULAR;
+    bool isEmbedded = (sound->flags & AUDIO_ENTRY_FLAG_IS_EMBEDDED) != 0;
+    bool isCompressed = (sound->flags & AUDIO_ENTRY_FLAG_IS_COMPRESSED) != 0;
+    bool inAudo = !isRegular || isEmbedded || isCompressed;
 
     uint8_t* oggData = NULL;
     int oggSize = 0;
@@ -226,7 +236,8 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             DbgPrint("BS: bad audioFile idx %d (audo count=%d)\n", sound->audioFile, (int)dw->audo.count);
             return inst->instanceId;
         }
-        AudioEntry* entry = &dw->audo.entries[sound->audioFile];
+        DataWin_loadAudoIfNeeded(audioData, (uint32_t)sound->audioFile);
+        AudioEntry* entry = &audioData->audo.entries[sound->audioFile];
         if (!entry->data || entry->dataSize == 0) {
             DbgPrint("BS: empty audio entry\n");
             return inst->instanceId;
