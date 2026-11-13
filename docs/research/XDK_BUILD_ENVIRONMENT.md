@@ -310,3 +310,265 @@ Sources: [Unofficial Xbox 360 Development Guide — environment and SDK history]
 ---
 
 **Bottom line:** first reproduce the existing VS2010-era XDK project in an isolated, properly licensed environment. In parallel, OXDK is the best experiment for building against real XDK libraries from a modern host. Keep hosted CI focused on portable core correctness, and treat XEX/emulator/hardware validation as separate gates.
+
+---
+
+# SECOND RESEARCH PASS
+
+**Second-pass date:** 2026-11-13  
+**Scope:** revalidation against the current working branch, source-level audit of the XDK adapters and build project, and concrete implementation/test recommendations. This pass does not claim an Xbox build or runtime test.
+
+## 11. Revalidation and current repository state
+
+The branch `refresh2/modern-upstream-migration` still exists. A GitHub compare from the prior report commit `5ac4091448877fc1ce738f69d77b0c64df956925` to the branch reports **15 commits ahead, 0 behind**. The compare lists work from other contributors in:
+
+- `docs/research/AUDIO_FILESYSTEM_AUDIT.md`
+- `docs/research/GAME_COMPATIBILITY.md`
+- `docs/research/INDEPENDENT_CODE_REVIEW.md`
+- `src/common.h`
+- `src/xbox360-xdk/main.cpp`
+- `src/xbox360-xdk/xaudio2_audio.cpp`
+- `src/xbox360-xdk/xdk_file_system.cpp`
+
+The existing XDK report was fetched from the branch before this update and its content was preserved in full. The branch comparison did not list `docs/research/XDK_BUILD_ENVIRONMENT.md` among those 15 commits, so the contributor work above was not overwritten or folded into this file.
+
+The current upstream `ButterscotchRunner/Butterscotch` `main` ref compares identical to the previously inspected upstream baseline `0c94bfb05e3cb4b8946a38f8085747035dd37f94` at the time of this pass. This means the old upstream SHA remains a valid baseline for this review; it is not evidence that the repository will never change again.
+
+### Current source snapshots inspected
+
+The following Git blob IDs identify the exact files reviewed from `refresh2/modern-upstream-migration`:
+
+| File | Blob SHA |
+|---|---|
+| `Butterscotch360.vcxproj` | `2fc2bb5bc081339d02d0156f8829310d0fdfed7d` |
+| `src/renderer.h` | `ae09f7dc910d0f072d89baf569a6826607d56054` |
+| `src/common.h` | `eaf4b51148de24be014951c36eee4156a109fc5d` |
+| `src/xbox360-xdk/d3d9_renderer.cpp` | `aed24e9a03f376046822b851174e6879434c4f48` |
+| `src/xbox360-xdk/d3d9_renderer.h` | `b1f365a341d64b393b8d2be1ae31d4f8adb9df38` |
+| `src/xbox360-xdk/xaudio2_audio.cpp` | `84bb2863b60b37507f9898c1597115f1ac13da09` |
+| `src/xbox360-xdk/xdk_file_system.cpp` | `84bb2863b60b37507f9898c1597115f1ac13da09` |
+| `src/xbox360-xdk/main.cpp` | `3c8e1cb4d7dc864d4a40c1bae9db3aab51d8378a` |
+
+**Correction to the original report's framing:** the D3D9 problem is more severe and more specific than simply “the legacy renderer does not satisfy the modern vtable.” The current implementation uses a positional initializer whose entries are shifted against the modern vtable layout. This is a concrete ABI/API wiring defect, not just a list of missing optional features.
+
+## 12. Critical renderer finding: positional vtable initializer is incompatible
+
+### Confirmed source facts
+
+The current `src/renderer.h` declares a modern `RendererVtable` beginning with this order:
+
+1. `init`
+2. `destroy`
+3. `beginFrame`
+4. `endFrameInit`
+5. `endFrameEnd`
+6. `beginView`
+7. `endView`
+8. `applyProjection`
+9. `beginGUI`
+10. `setGuiProjection`
+11. `endGUI`
+12. `drawSprite`
+13. `drawSpritePart`
+14. `drawSpritePartColor`
+15. `drawSpritePos`
+16. `drawRectangle`
+17. ...many more entries, through surfaces, shaders, texture queries and depth state.
+
+But `src/xbox360-xdk/d3d9_renderer.cpp` still initializes `d3d9RendererVtable` positionally with only 16 values:
+
+```cpp
+static RendererVtable d3d9RendererVtable = {
+    d3d9Init,
+    d3d9Destroy,
+    d3d9BeginFrame,
+    d3d9EndFrame,
+    d3d9BeginView,
+    d3d9EndView,
+    d3d9DrawSprite,
+    d3d9DrawSpritePart,
+    d3d9DrawRectangle,
+    d3d9DrawLine,
+    d3d9DrawLineColor,
+    d3d9DrawText,
+    d3d9Flush,
+    d3d9CreateSpriteFromSurface,
+    d3d9DeleteSprite,
+    NULL,
+};
+```
+
+That initializer is not merely short. From entry 4 onward it assigns functions to the wrong callback slots. For example:
+
+| Modern slot | Value currently assigned | Actual intended function |
+|---|---|---|
+| `endFrameInit` | `d3d9EndFrame` | needs a modern end-frame-init implementation |
+| `endFrameEnd` | `d3d9BeginView` | needs the end-of-frame callback |
+| `beginView` | `d3d9EndView` | needs begin-view |
+| `endView` | `d3d9DrawSprite` | needs end-view |
+| `applyProjection` | `d3d9DrawSpritePart` | needs projection application |
+| `beginGUI` | `d3d9DrawRectangle` | needs GUI target/viewport setup |
+| `setGuiProjection` | `d3d9DrawLine` | needs GUI projection |
+| `endGUI` | `d3d9DrawLineColor` | needs GUI pass teardown |
+| `drawSprite` | `d3d9DrawText` | needs sprite draw |
+| `drawSpritePart` | `d3d9Flush` | needs sprite-part draw |
+| `drawSpritePartColor` | `d3d9CreateSpriteFromSurface` | incompatible callback signature |
+| `drawSpritePos` | `d3d9DeleteSprite` | incompatible callback signature |
+| `drawRectangle` | `NULL` | needs rectangle draw |
+
+The remaining modern slots are zero-initialized, but several early slots already contain incorrect non-null function pointers. A runtime “non-null vtable” check is therefore insufficient: a callback can be non-null and still have the wrong signature/meaning.
+
+### Required implementation change
+
+Replace the positional initializer with designated/member assignments in a one-time initializer, following the pattern already used by the audio and filesystem adapters:
+
+- `memset(&d3d9RendererVtable, 0, sizeof(...))`
+- Assign every callback by member name.
+- Keep genuinely unsupported optional callbacks null only where the modern runner explicitly supports null.
+- Implement required callbacks before setting the renderer as usable.
+- Add a compile-time or unit-test audit that enumerates required renderer members and fails if any required entry is null.
+- Do not rely on compiler warnings to detect this: the old project uses warning level 3 and does not declare warnings-as-errors.
+
+For an initial bring-up, implement the minimum valid frame/view/GUI/sprite/primitive callbacks first, but use named assignments so missing entries remain visible. Do not map unrelated legacy functions into “closest-looking” slots.
+
+### Renderer tests
+
+1. **Vtable wiring test:** verify every required callback points to the intended named implementation; specifically assert that `endFrameInit`, `endFrameEnd`, `beginView`, `endView`, `applyProjection`, `beginGUI`, `setGuiProjection`, `endGUI`, `drawSprite` and `drawSpritePart` are not shifted.
+2. **Signature test:** compile each callback assignment with warnings enabled and treat incompatible function-pointer diagnostics as errors in the portable test target.
+3. **Lifecycle test with a mock device:** verify begin-frame, begin-view, end-view, GUI and end-frame callbacks occur in the same order as `Runner_drawPre`, `Runner_beginFrame`, `Runner_drawViews`, `Runner_drawPost` and `Runner_drawGUI`.
+4. **First-room smoke test:** ensure the renderer survives `Runner_create` and `Runner_initFirstRoom` without calling a null or miswired callback.
+5. **Visual smoke test:** render one textured quad, one untextured rectangle, one line, one glyph and one alpha-blended sprite before attempting a full game.
+
+## 13. Additional D3D9/XDK risks found in the current implementation
+
+These are source-review findings or validation gaps, not claims of observed hardware failures.
+
+### Resource creation and failure propagation
+
+In `d3d9Init`, the renderer allocates `vertexData`, compiles two shaders, creates shader objects and a vertex declaration, creates the white texture, allocates texture arrays, then uploads every TXTR page. Several operations check only some failures:
+
+- `malloc`/ `calloc` results are not consistently checked before later use.
+- `CreateVertexShader`, `CreatePixelShader`, `CreateVertexDeclaration`, `CreateTexture`, `LockRect` and `UnlockRect` results are not consistently propagated.
+- Shader compilation failure returns from a `void` init callback after logging, but there is no explicit renderer-ready state consumed by `main.cpp` or `Runner_create`.
+- The TXTR upload path stores a null texture after decode or texture-creation failure and continues. That can become a later draw-time fallback or missing texture rather than a clear startup error.
+
+**Recommendation:** add an explicit `initialized/failed` state to `D3D9Renderer`; check every HRESULT and allocation; release partially created resources through one idempotent cleanup path; and make startup abort with a clear diagnostic if renderer initialization fails. Since the current generic `RendererVtable.init` returns `void`, do not silently pretend it can report success. Either validate the backend before passing it to `Runner_create`, or propose a coordinated core API change with an explicit status return. Avoid changing only the XDK adapter to a new function signature that no longer matches the shared contract.
+
+### Texture upload path needs hardware validation
+
+The current code decodes PNG data with `stbi_load_from_memory`, writes pixels to `D3DFMT_LIN_A8R8G8B8`, and comments that linear textures can be sampled directly on Xbox 360. The code does not create the tiled copy described in its own comment. This may be intentional if the selected XDK path supports the chosen linear texture usage, but it must not be assumed from the comment.
+
+Test at least:
+- 1x1, odd-width, non-power-of-two and maximum expected TXTR dimensions.
+- Alpha edges and fully transparent pixels.
+- A texture with distinct red/green/blue/alpha channel values to expose endian/channel-order mistakes.
+- A texture large enough to cross relevant pitch/alignment boundaries.
+- Sampling the same texture through sprite and font paths.
+
+Check all `CreateTexture`, `LockRect`, `UnlockRect` and device draw HRESULTs, and confirm the required pitch/format/alignment rules against the exact XDK documentation for the chosen XDK release.
+
+### Draw batching and primitive assumptions
+
+`flushBatch` uses `DrawPrimitiveUP(D3DPT_QUADLIST, ...)`, while the generic renderer contract exposes points, lines, line strips, triangles, triangle strips and triangle fans. The legacy quad batching path does not by itself implement the modern generic primitive/vertex-buffer contract.
+
+Verify that `D3DPT_QUADLIST` is supported by the exact Xbox 360 D3D9 API/toolchain being targeted; do not infer support from desktop D3D9. If the Xbox-specific API does not support it, convert each quad into two triangles and use a supported primitive type. Add tests for winding order, UV orientation, alpha blending and batch flushes at 1, 2048 and 2049 quads.
+
+## 14. Audio adapter: contract coverage is better, but semantics remain incomplete
+
+### Confirmed improvements
+
+The current `xaudio2_audio.cpp` initializes the modern audio vtable by named member assignments, avoiding the positional-shift problem found in D3D9. It binds the 31 modern entries and explicitly provides stubs for unsupported streaming and encoded playback rather than leaving arbitrary function pointers.
+
+The current implementation handles decoder-backed WAV/OGG playback, XAudio2 voices, per-instance gain/pitch, looping, pause/resume, master gain, audio groups and lazy AUDO loading. It also defines explicit little-endian WAV readers and disables stb_vorbis's fast scaled-float path for the big-endian Xenon target.
+
+### Remaining behavior and lifecycle questions
+
+- `xdkCreateStream`, `xdkDestroyStream` and `xdkPlayEncoded` intentionally return failure/no-op results. Confirm the runner handles these failures gracefully for every game path that requests them.
+- `xdkSetSoundSpatial` and listener-position handling are stubs; spatial audio will not be equivalent to a backend that implements positional routing.
+- `xdkAudioInit` can return early after XAudio2 or mastering-voice creation fails. The generic init callback is `void`; startup needs a way to detect that the audio backend is unavailable.
+- The current backend decodes OGG/WAV into PCM and creates source voices. Measure peak memory with many simultaneous sounds and large embedded AUDO assets; the Xbox 360 memory budget makes full-file decode a meaningful constraint.
+- Confirm pitch semantics for SOND pitch versus runtime pitch changes, and verify that the XAudio2 frequency-ratio range supports the runner's accepted pitch range.
+- Confirm every voice is stopped/destroyed before its PCM buffer is freed, including all early-error paths and shutdown while sounds are active.
+
+### Audio tests
+
+1. Play embedded WAV and OGG assets; test external OGG file loading separately.
+2. Test zero-length, truncated, malformed and oversized WAV/OGG/AUDO data.
+3. Test mono/stereo and sample-rate variations supported by the game corpus.
+4. Exercise simultaneous voices up to and beyond `XDK_MAX_SOUND_INSTANCES`; verify the documented priority policy rather than silently dropping important sounds.
+5. Test looping, pause/resume, stop, fade-to-gain, master gain and audio-group gain independently and in combination.
+6. Test lazy group load, repeated group load, group failure and shutdown while a group is loaded.
+7. Call stream/encoded APIs from a mock runner and confirm the runner handles their explicit failure values without dereferencing invalid stream state.
+8. Run long-duration playback and verify voice reclamation, PCM ownership and memory stability.
+
+## 15. Filesystem adapter: implementation details and edge cases
+
+### Confirmed implementation
+
+The current `xdk_file_system.cpp` uses named assignments for all 20 modern filesystem callbacks. It implements text/binary access, rename/delete, streaming handles, directory operations and enumeration. It loops on partial `ReadFile`/`WriteFile` results for whole-file helpers, checks byte counts and rejects files beyond the signed 32-bit engine API limit. It also handles the Win32 `SetFilePointer` sentinel correctly by checking `GetLastError`.
+
+### Additional concerns
+
+- `xdkResolvePath` concatenates the base directory with the supplied path and converts forward slashes. It treats drive-qualified and root-leading paths as absolute, but does not normalize or reject `..` traversal segments. If the intended contract is “relative to the game data directory,” add normalization and explicit escape tests. If absolute paths are intentionally part of GameMaker compatibility, document that policy and test it rather than accidentally restricting valid game behavior.
+- The binary streaming API uses 32-bit positions/sizes. This is consistent with the current engine API's signed 32-bit limits, but files above that range must fail predictably rather than wrap.
+- `xdkListDirectory` silently skips an entry if allocating its name fails. This is a defensible best-effort policy only if the caller can tolerate incomplete enumeration; otherwise surface an error or define the behavior in the contract.
+- Test drive roots, `game:\\`, `d:\\`, nested paths, empty relative paths, trailing separators, mixed slash styles, missing files, read-only files, rename across directories, and directories containing both files and subdirectories.
+- Confirm the lifetime/ownership contract for the dynamic-array result of `listDirectory`: callers must free each entry name and the array using the same allocator conventions. A mismatch here can leak or corrupt memory on shutdown.
+
+### Filesystem tests
+
+1. Whole-file read/write with empty, one-byte, multi-megabyte and boundary-size files.
+2. Streaming open/read/tell/seek/rewrite/write/close, including seeks to start/end and invalid negative offsets.
+3. Partial-read/write simulation where feasible, and explicit zero-byte progress/error behavior.
+4. Rename/delete behavior for existing, missing, read-only and cross-directory files.
+5. Directory create/list/delete with nested directories and mixed file types.
+6. Path resolution for `foo/bar`, `foo\\bar`, absolute drive paths, root-leading paths and `..` segments.
+7. Verify no 32-bit size/offset truncation and no leaked handles after every failure path.
+
+## 16. Startup and project-file findings
+
+### XDK project file
+
+The current `Butterscotch360.vcxproj` still declares `ToolsVersion="4.0"`, `Debug|Xbox 360` and `Release|Xbox 360`, forces `compat_msvc.h`, compiles all listed `.c` files as C++, disables exceptions/RTTI and links the XDK-specific library variants. It does **not** declare a `PlatformToolset` value in the project file. Therefore `ToolsVersion=4.0` alone does not identify the exact Xbox compiler, XDK release or installed platform targets; the matching XDK integration must supply the Xbox 360 platform props/targets and toolchain.
+
+The project also has an empty `<ImageXex>` element and uses XDK deployment metadata with `RemoteRoot=xe:\\Butterscotch`. Confirm the XDK's imported targets supply the expected linker/XEX packaging defaults. Do not assume a successful MSBuild evaluation means a deployable XEX has been produced.
+
+### Main startup checks
+
+The current `main.cpp` creates the D3D device, parses `data.win`, creates filesystem/renderer/VM/audio objects, then calls `Runner_create` and `Runner_initFirstRoom`. Some subsystem creation results are not checked before use. In particular, add explicit checks for:
+
+- `XdkFileSystem_create`
+- `D3D9Renderer_create`
+- `VM_create`
+- `XdkAudioSystem_create`
+- `Runner_create`
+
+The startup path also uses an infinite loop when `data.win` is missing or parsing fails. That may help a debugger remain attached, but it is not a useful production failure mode. Prefer a clear diagnostic plus controlled cleanup/exit, with an optional debug-only hang switch.
+
+The modern runner owns subsystem initialization through `Runner_create`; the entry point must not separately initialize the same renderer/audio backend. Add a single documented ownership table stating which function allocates, initializes and destroys each object. The existing cleanup sequence manually destroys audio and renderer, nulls `runner->audioSystem`, then frees the runner and VM/data. Verify this against `Runner_free` so no resource is destroyed twice and no object is freed while still referenced.
+
+### Project/build validation tasks
+
+- Parse the project XML in CI and validate all explicit `ClCompile` paths/globs resolve to tracked files.
+- Check the Debug and Release library lists independently.
+- Check that the Xbox platform props/targets and compiler are present before invoking MSBuild; fail with a targeted message if they are absent.
+- Capture the evaluated MSBuild properties and exact compiler/linker command lines in a private local log, redacting proprietary installation paths where necessary.
+- Verify the output is a valid XEX with the expected entry point, imports and packaging metadata; a successful compile-only target is not enough.
+
+## 17. Prioritized implementation plan
+
+1. **P0 — fix renderer vtable wiring.** Replace the positional initializer with named member assignments. Add a test that checks required callbacks and catches incompatible signatures.
+2. **P0 — establish subsystem initialization failure handling.** Check all object constructors and add a supported way to detect renderer/audio initialization failure before first-room startup.
+3. **P1 — complete minimum modern renderer lifecycle.** Implement frame/view/projection/GUI hooks with correct render-target and viewport semantics before expanding drawing features.
+4. **P1 — add renderer resource/error handling.** Check allocations and HRESULTs; clean up partially initialized devices/textures/shaders safely.
+5. **P1 — validate filesystem path and ownership semantics.** Add path normalization policy, 32-bit boundary tests, enumeration ownership tests and handle-leak tests.
+6. **P1 — test audio failure behavior and memory pressure.** Especially large AUDO decode, many concurrent voices, voice cleanup and unsupported stream/encoded paths.
+7. **P2 — validate XDK project integration.** Confirm the actual XDK platform props/targets, compiler, linker, XEX packaging and deployment commands on a legitimately licensed environment.
+8. **P2 — run emulator and hardware gates separately.** Keep portable CI, XDK compile, Xenia boot and real-console results as separate status records.
+
+## 18. Second-pass confidence and limitations
+
+- **Confirmed from current source:** the D3D9 vtable is initialized positionally against a substantially expanded modern struct, causing callback misalignment; audio and filesystem vtables use named assignments; the XDK project uses ToolsVersion 4.0 but does not declare a PlatformToolset; the startup path lacks several constructor-result checks.
+- **Confirmed from GitHub compare:** the working branch contains 15 commits beyond the prior report commit and the listed contributor changes do not include this XDK report; modern upstream `main` is identical to the previously recorded upstream baseline during this pass.
+- **Engineering risks requiring target validation:** Xbox-specific `D3DPT_QUADLIST` behavior, linear texture sampling/pitch/format rules, exact XAudio2 API/library compatibility, actual XEX packaging defaults, XDK compiler behavior and filesystem path semantics on target storage.
+- **Not performed:** no Xbox 360 XDK compiler was available; no XDK build, XEX generation, Xenia execution or physical-console test was performed. No claim of runtime success is made.
