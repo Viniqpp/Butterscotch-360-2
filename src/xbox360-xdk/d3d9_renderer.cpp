@@ -412,7 +412,7 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     dr->sceneActive = false;
     HRESULT sceneHr = dev->BeginScene();
     if (FAILED(sceneHr)) {
-        DbgPrint("BS: D3D9 BeginScene failed: hr=0x%08X\\n", (unsigned)sceneHr);
+        DbgPrint("BS: D3D9 BeginScene failed: hr=0x%08X\n", (unsigned)sceneHr);
         return;
     }
     dr->sceneActive = true;
@@ -1222,7 +1222,7 @@ static void d3d9PrimitiveEnd(Renderer* renderer) {
             hr = Dev(dr)->DrawPrimitiveUP(type, primitiveCount,
                 dr->primitiveVertexData, sizeof(SpriteVertex));
         }
-        if (FAILED(hr)) DbgPrint("BS: primitive DrawPrimitiveUP failed: hr=0x%08X\\n", (unsigned)hr);
+        if (FAILED(hr)) DbgPrint("BS: primitive DrawPrimitiveUP failed: hr=0x%08X\n", (unsigned)hr);
     }
 
     dr->primitiveActive = false;
