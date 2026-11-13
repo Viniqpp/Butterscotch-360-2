@@ -943,7 +943,7 @@ static float xdkInstanceTrackPosition(XdkSoundInstance* inst) {
 
 static float xdkGetTrackPosition(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE)
+    if (xdkIsInstanceId(soundOrInstance))
         return xdkInstanceTrackPosition(findById(xa, soundOrInstance));
 
     if (soundOrInstance < 0) return 0.0f;
@@ -1024,7 +1024,7 @@ static void xdkSetTrackPosition(AudioSystem* audio, int32_t soundOrInstance, flo
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (!(positionSeconds >= 0.0f) || positionSeconds > FLT_MAX) return;
 
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    if (xdkIsInstanceId(soundOrInstance)) {
         xdkSeekInstance(findById(xa, soundOrInstance), positionSeconds);
         return;
     }
@@ -1239,12 +1239,32 @@ static float xdkMeasureAudioBytes(const uint8_t* data, uint32_t bytes) {
 
 static float xdkGetSoundLength(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    XdkSoundInstance* inst = soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE
+
+    if (soundOrInstance >= XDK_AUDIO_STREAM_INDEX_BASE) {
+        int32_t slot = soundOrInstance - XDK_AUDIO_STREAM_INDEX_BASE;
+        if (slot < 0 || slot >= XDK_MAX_AUDIO_STREAMS || !xa->streams[slot].active)
+            return 0.0f;
+        XdkAudioStream* stream = &xa->streams[slot];
+        if (stream->lengthSeconds >= 0.0f) return stream->lengthSeconds;
+
+        uint8_t* encoded = NULL;
+        uint32_t encodedBytes = 0;
+        if (!xdkReadExternalAudioForLength(xa, stream->filePath, &encoded, &encodedBytes)) {
+            stream->lengthSeconds = 0.0f;
+            return 0.0f;
+        }
+        stream->lengthSeconds = xdkMeasureAudioBytes(encoded, encodedBytes);
+        free(encoded);
+        return stream->lengthSeconds;
+    }
+
+    XdkSoundInstance* inst = xdkIsInstanceId(soundOrInstance)
         ? findById(xa, soundOrInstance) : NULL;
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE)
+    if (xdkIsInstanceId(soundOrInstance)) {
         return inst && inst->sampleRate > 0 && inst->channels > 0
             ? (float)inst->pcmSize / ((float)inst->sampleRate * (float)inst->channels * 2.0f)
             : 0.0f;
+    }
 
     if (soundOrInstance < 0 || !audio->dw ||
         (uint32_t)soundOrInstance >= audio->dw->sond.count) return 0.0f;
@@ -1258,7 +1278,7 @@ static float xdkGetSoundLength(AudioSystem* audio, int32_t soundOrInstance) {
         }
     }
 
-    // Match the modern API: a valid SOND length query works before playback.
+    // A valid SOND length query works before playback.
     Sound* sound = &audio->dw->sond.sounds[soundOrInstance];
     int32_t groupIndex = sound->audioGroup < 0 ? 0 : sound->audioGroup;
     if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex))
@@ -1293,7 +1313,6 @@ static float xdkGetSoundLength(AudioSystem* audio, int32_t soundOrInstance) {
     free(owned);
     return duration;
 }
-
 static void xdkSetMasterGainForListener(AudioSystem* audio, float gain, int32_t listenerId) {
     (void)listenerId;
     xdkSetMasterGain(audio, gain);
