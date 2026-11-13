@@ -65,9 +65,14 @@ static void setupDefaultMappings(void) {
         { XINPUT_GAMEPAD_START,      27 },  // VK_ESCAPE (menu)
         { XINPUT_GAMEPAD_BACK,       27 },  // VK_ESCAPE
     };
-    xpadMappingCount = sizeof(defaults) / sizeof(XpadMapping);
     xpadMappings = (XpadMapping*)malloc(sizeof(defaults));
+    if (!xpadMappings) {
+        xpadMappingCount = 0;
+        DbgPrint("BS: default controller mapping allocation failed\\n");
+        return;
+    }
     memcpy(xpadMappings, defaults, sizeof(defaults));
+    xpadMappingCount = sizeof(defaults) / sizeof(XpadMapping);
 }
 
 static float xdkNormalizeStick(SHORT value) {
