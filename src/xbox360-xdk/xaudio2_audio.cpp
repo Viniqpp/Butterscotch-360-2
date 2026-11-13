@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <float.h>
 
 // stb_vorbis on big-endian Xbox 360:
 // Disable the fast float-to-int path which has endian assumptions.
@@ -104,6 +105,21 @@ static void destroyInstance(XdkSoundInstance* inst) {
     inst->active = false;
 }
 
+
+static bool xdkApplyInstancePitch(XdkSoundInstance* inst, float pitch) {
+    // Reject NaN, infinities, zero and negative ratios before reaching XAudio2.
+    if (!(pitch > 0.0f) || pitch > FLT_MAX) return false;
+    if (inst && inst->pVoice) {
+        HRESULT hr = inst->pVoice->SetFrequencyRatio(pitch);
+        if (FAILED(hr)) {
+            DbgPrint("BS: SetFrequencyRatio failed: hr=0x%08X ratio=%d/1000\n",
+                     (unsigned)hr, (int)(pitch * 1000.0f));
+            return false;
+        }
+    }
+    if (inst) inst->pitch = pitch;
+    return inst != NULL;
+}
 
 static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
@@ -256,7 +272,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     if (sound->volume >= 0) inst->sondVolume = sound->volume;
     // SOND pitch is the initial playback pitch; later instance/sound-index
     // pitch changes replace this effective value, matching the upstream API.
-    if (sound->pitch > 0.0f) inst->pitch = sound->pitch;
+    if (sound->pitch > 0.0f && sound->pitch <= FLT_MAX) inst->pitch = sound->pitch;
 
     int32_t groupIndex = sound->audioGroup < 0 ? 0 : sound->audioGroup;
     if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex))
@@ -525,9 +541,17 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         destroyInstance(inst);
         return -1;
     }
-    inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain *
-                            AudioSystem_soundGroupGain(audio, soundIndex));
-    inst->pVoice->SetFrequencyRatio(inst->pitch);
+    hr = inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain *
+                                  AudioSystem_soundGroupGain(audio, soundIndex));
+    if (FAILED(hr)) {
+        DbgPrint("BS: SetVolume failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+        return -1;
+    }
+    if (!xdkApplyInstancePitch(inst, inst->pitch)) {
+        destroyInstance(inst);
+        return -1;
+    }
     hr = inst->pVoice->Start(0);
     if (FAILED(hr)) {
         DbgPrint("BS: Start failed: hr=0x%08X\n", (unsigned)hr);
@@ -682,22 +706,18 @@ static float xdkGetSoundGain(AudioSystem* audio, int32_t soundOrInstance) {
 
 static void xdkSetSoundPitch(AudioSystem* audio, int32_t soundOrInstance, float pitch) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
+    if (!(pitch > 0.0f) || pitch > FLT_MAX) return;
     if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
-        if (inst) {
-            inst->pitch = pitch;
-            if (inst->pVoice) inst->pVoice->SetFrequencyRatio(pitch);
-        }
+        if (inst) xdkApplyInstancePitch(inst, pitch);
         return;
     }
     if (soundOrInstance < 0) return;
     XdkInstanceArray* arr = Instances(xa);
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
         XdkSoundInstance* inst = &arr->instances[i];
-        if (inst->active && inst->soundIndex == soundOrInstance) {
-            inst->pitch = pitch;
-            if (inst->pVoice) inst->pVoice->SetFrequencyRatio(pitch);
-        }
+        if (inst->active && inst->soundIndex == soundOrInstance)
+            xdkApplyInstancePitch(inst, pitch);
     }
 }
 
