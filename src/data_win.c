@@ -3115,7 +3115,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         wholeFileData = (uint8_t *)safeMalloc((size_t) fileSize);
         size_t wholeFileRead = fread(wholeFileData, 1, fileSize, file);
         if (wholeFileRead != fileSize) {
-            logError("Short read while loading %s (expected %zu, got %zu)\n", filePath, fileSize, wholeFileRead);
+            logError("Short read while loading %s (expected %u, got %u)\n", filePath, (unsigned)fileSize, (unsigned)wholeFileRead);
             free(wholeFileData);
             fclose(file);
             DataWin_free(dw);
