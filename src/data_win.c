@@ -3057,7 +3057,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     FILE* file = fopen(filePath, "rb");
     if (!file) {
         logError("Failed to open file: %s\n", filePath);
-        exit(1);
+        return nullptr;
     }
 
     // Use a large read buffer to reduce the number of physical reads
@@ -3065,19 +3065,22 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     // call would otherwise trigger a separate disc read of just a few sectors
     setvbuf(file, nullptr, _IOFBF, 128 * 1024);
 
-    fseek(file, 0, SEEK_END);
-    long fileSizeRaw = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    if (0 >= fileSizeRaw) {
-        logError("Invalid file size: %ld\n", fileSizeRaw);
+    if (fseek(file, 0, SEEK_END) != 0) {
+        logError("Failed to seek to end of file: %s\n", filePath);
         fclose(file);
-        exit(1);
+        return nullptr;
+    }
+    long fileSizeRaw = ftell(file);
+    if (fileSizeRaw <= 0 || fseek(file, 0, SEEK_SET) != 0) {
+        logError("Invalid file size or failed rewind: %ld\n", fileSizeRaw);
+        fclose(file);
+        return nullptr;
     }
     size_t fileSize = (size_t) fileSizeRaw;
 
     // Allocate and zero-initialize DataWin
     DataWin* dw = (DataWin *)safeCalloc(1, sizeof(DataWin));
+    dw->fileSize = fileSize;
 
     BinaryReader reader = BinaryReader_create(file, (size_t) fileSize);
 
@@ -3087,14 +3090,22 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     uint8_t* wholeFileData = nullptr;
     if (options.loadType == DATAWINLOADTYPE_LOAD_IN_MEMORY_AHEAD_OF_TIME) {
         wholeFileData = (uint8_t *)safeMalloc((size_t) fileSize);
-        safeFread(wholeFileData, fileSize, file, filePath);
+        size_t wholeFileRead = fread(wholeFileData, 1, fileSize, file);
+        if (wholeFileRead != fileSize) {
+            logError("Short read while loading %s (expected %zu, got %zu)\\n", filePath, fileSize, wholeFileRead);
+            free(wholeFileData);
+            fclose(file);
+            DataWin_free(dw);
+            return nullptr;
+        }
         BinaryReader_setBuffer(&reader, wholeFileData, 0, (size_t) fileSize);
     } else if (options.loadType == DATAWINLOADTYPE_MAP_FILE) {
         wholeFileData = mapFile(file, fileSize);
         if (!wholeFileData) {
             logError("Failed to map file\n");
             fclose(file);
-            exit(1);
+            DataWin_free(dw);
+            return nullptr;
         }
         BinaryReader_setBuffer(&reader, wholeFileData, 0, (size_t) fileSize);
         dw->mappedFile = wholeFileData;
@@ -3162,9 +3173,11 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     }
 
     if (!codeExists && options.parseCode) {
-        logError("CODE chunk does not exist or is empty! This usually means you're loading a YYC game.\n");
+        logError("CODE chunk does not exist or is empty! This usually means you're loading a YYC game.\\n");
         fclose(file);
-        exit(1);
+        if (options.loadType == DATAWINLOADTYPE_LOAD_IN_MEMORY_AHEAD_OF_TIME) free(wholeFileData);
+        DataWin_free(dw);
+        return nullptr;
     }
 
     // Pass 2: Parse all chunks
@@ -3221,8 +3234,12 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
             if (chunkBuffer) {
                 size_t read = fread(chunkBuffer, 1, chunkLength, reader.file);
                 if (read != chunkLength) {
-                    logError("DataWin: short read on chunk %.4s (expected %u, got %zu)\n", chunkName, chunkLength, read);
-                    exit(1);
+                    logError("DataWin: short read on chunk %.4s (expected %u, got %zu)\\n", chunkName, chunkLength, read);
+                    free(chunkBuffer);
+                    fclose(file);
+                    if (options.loadType == DATAWINLOADTYPE_LOAD_IN_MEMORY_AHEAD_OF_TIME) free(wholeFileData);
+                    DataWin_free(dw);
+                    return nullptr;
                 }
                 BinaryReader_setBuffer(&reader, chunkBuffer, chunkDataStart, chunkLength);
             }
@@ -3362,7 +3379,8 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         dw->fileSize = (size_t) fileSize;
     } else {
         dw->lazyLoadFile = nullptr;
-        dw->fileSize = 0;
+        // Keep the mapping length while a mapped file is retained for asset data.
+        dw->fileSize = dw->mappedFile ? (size_t)fileSize : 0;
         fclose(file);
     }
 
