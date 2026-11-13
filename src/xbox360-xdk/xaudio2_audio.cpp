@@ -122,9 +122,12 @@ static void destroyInstance(XdkSoundInstance* inst) {
 
 
 static bool xdkApplyInstancePitch(XdkSoundInstance* inst, float pitch) {
-    // Reject NaN, infinities, zero and negative ratios before reaching XAudio2.
-    if (!(pitch > 0.0f) || pitch > FLT_MAX) return false;
-    if (inst && inst->pVoice) {
+    // Voices are created with XAUDIO2_MAX_FREQ_RATIO below. Reject NaN,
+    // infinities and out-of-range ratios instead of storing a value that
+    // XAudio2 would clamp differently from the GameMaker-visible state.
+    if (!(pitch >= XAUDIO2_MIN_FREQ_RATIO && pitch <= XAUDIO2_MAX_FREQ_RATIO) || !inst)
+        return false;
+    if (inst->pVoice) {
         HRESULT hr = inst->pVoice->SetFrequencyRatio(pitch);
         if (FAILED(hr)) {
             DbgPrint("BS: SetFrequencyRatio failed: hr=0x%08X ratio=%d/1000\n",
@@ -132,8 +135,8 @@ static bool xdkApplyInstancePitch(XdkSoundInstance* inst, float pitch) {
             return false;
         }
     }
-    if (inst) inst->pitch = pitch;
-    return inst != NULL;
+    inst->pitch = pitch;
+    return true;
 }
 
 static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
@@ -608,7 +611,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     wfx.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 
     IXAudio2* pXA = (IXAudio2*)xa->pXAudio2;
-    HRESULT hr = pXA->CreateSourceVoice(&inst->pVoice, (WAVEFORMATEX*)&wfx);
+    HRESULT hr = pXA->CreateSourceVoice(&inst->pVoice, (WAVEFORMATEX*)&wfx, 0, XAUDIO2_MAX_FREQ_RATIO, NULL, NULL, NULL);
     if (FAILED(hr) || !inst->pVoice) {
         DbgPrint("BS: CreateSourceVoice failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
@@ -797,7 +800,7 @@ static float xdkGetSoundGain(AudioSystem* audio, int32_t soundOrInstance) {
 
 static void xdkSetSoundPitch(AudioSystem* audio, int32_t soundOrInstance, float pitch) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    if (!(pitch > 0.0f) || pitch > FLT_MAX) return;
+    if (!(pitch >= XAUDIO2_MIN_FREQ_RATIO && pitch <= XAUDIO2_MAX_FREQ_RATIO)) return;
     if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
         if (inst) xdkApplyInstancePitch(inst, pitch);
