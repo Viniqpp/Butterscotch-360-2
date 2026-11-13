@@ -1067,6 +1067,7 @@ static void d3d9DrawTriangle(Renderer* renderer, float x1, float y1, float x2, f
         return;
     }
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    if (!dr->sceneActive) return;
     flushBatch(dr);
     IDirect3DDevice9* dev = Dev(dr);
     dev->SetTexture(0, (IDirect3DBaseTexture9*)dr->whiteTexture);
@@ -1211,7 +1212,7 @@ static void d3d9PrimitiveEnd(Renderer* renderer) {
             break;
     }
 
-    if (primitiveCount > 0) {
+    if (primitiveCount > 0 && dr->sceneActive) {
         int32_t page = d3d9TextureHandleToPage(dr, (uint32_t)dr->primitiveTexture);
         IDirect3DBaseTexture9* texture = dr->whiteTexture
             ? (IDirect3DBaseTexture9*)dr->whiteTexture : NULL;
@@ -1277,7 +1278,7 @@ static float d3d9TextureGetTexelWidth(Renderer* r, uint32_t texID) {
     if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
     D3D9Renderer* dr = (D3D9Renderer*)r;
     int32_t page = dw->tpag.items[texID - 1].texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || dr->textureWidths[page] <= 0) return 0.0f;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page] || dr->textureWidths[page] <= 0) return 0.0f;
     return 1.0f / (float)dr->textureWidths[page];
 }
 static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
@@ -1285,7 +1286,7 @@ static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
     if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
     D3D9Renderer* dr = (D3D9Renderer*)r;
     int32_t page = dw->tpag.items[texID - 1].texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || dr->textureHeights[page] <= 0) return 0.0f;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page] || dr->textureHeights[page] <= 0) return 0.0f;
     return 1.0f / (float)dr->textureHeights[page];
 }
 static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
@@ -1294,7 +1295,7 @@ static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
     TexturePageItem* t = &dw->tpag.items[texID - 1];
     int32_t page = t->texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount ||
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page] ||
         dr->textureWidths[page] <= 0 || dr->textureHeights[page] <= 0) return false;
     float w = (float)dr->textureWidths[page], h = (float)dr->textureHeights[page];
     uv[0] = (float)t->sourceX / w;
