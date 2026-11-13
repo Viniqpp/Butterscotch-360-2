@@ -19,7 +19,10 @@
 #define INT32_MIN (-INT32_MAX - 1)
 #endif
 
-#if (defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || defined(__BIG_ENDIAN__)
+// Xenon (Xbox 360 XDK) is big-endian. The historical MSVC/XDK compiler
+// does not necessarily define GCC's __BYTE_ORDER__ macros; the project
+// explicitly defines _XBOX for this target.
+#if (defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)) || defined(__BIG_ENDIAN__) || defined(_XBOX) || defined(_M_PPC)
 #define IS_BIG_ENDIAN
 #endif
 
