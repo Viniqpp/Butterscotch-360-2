@@ -754,8 +754,13 @@ static float xdkGetTrackPosition(AudioSystem* audio, int32_t soundOrInstance) {
     if (totalFrames == 0) return 0.0f;
 
     uint64_t position = (uint64_t)inst->positionOffsetSamples + played;
-    if (inst->loop) position %= totalFrames;
-    else if (position > totalFrames) position = totalFrames;
+    if (inst->loop) {
+        uint64_t loopLength = totalFrames - inst->positionOffsetSamples;
+        if (loopLength > 0)
+            position = (uint64_t)inst->positionOffsetSamples + (played % loopLength);
+    } else if (position > totalFrames) {
+        position = totalFrames;
+    }
     return (float)position / (float)inst->sampleRate;
 }
 
