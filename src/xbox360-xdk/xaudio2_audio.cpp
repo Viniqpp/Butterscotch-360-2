@@ -665,7 +665,7 @@ static void xdkStopSound(AudioSystem* audio, int32_t soundOrInstance) {
     if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
         if (inst) destroyInstance(inst);
-    } else {
+    } else if (soundOrInstance >= 0) {
         for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
             if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance)
                 destroyInstance(&arr->instances[i]);
@@ -687,67 +687,85 @@ static bool xdkIsPlaying(AudioSystem* audio, int32_t soundOrInstance) {
 
     if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
-        return inst && !inst->paused;
+        if (!inst || inst->paused || !inst->pVoice) return false;
+        XAUDIO2_VOICE_STATE state;
+        inst->pVoice->GetState(&state, 0);
+        return state.BuffersQueued > 0;
     }
+    if (soundOrInstance < 0) return false;
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-        if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance && !arr->instances[i].paused)
-            return true;
+        XdkSoundInstance* inst = &arr->instances[i];
+        if (!inst->active || inst->soundIndex != soundOrInstance ||
+            inst->paused || !inst->pVoice) continue;
+        XAUDIO2_VOICE_STATE state;
+        inst->pVoice->GetState(&state, 0);
+        if (state.BuffersQueued > 0) return true;
     }
     return false;
+}
+
+static void xdkPauseInstance(XdkSoundInstance* inst) {
+    if (!inst || !inst->active || inst->paused) return;
+    if (!inst->pVoice) {
+        inst->paused = true;
+        return;
+    }
+    HRESULT hr = inst->pVoice->Stop(0);
+    if (FAILED(hr)) {
+        DbgPrint("BS: XAudio2 pause failed: hr=0x%08X\n", (unsigned)hr);
+        return;
+    }
+    inst->paused = true;
+}
+
+static void xdkResumeInstance(XdkSoundInstance* inst) {
+    if (!inst || !inst->active || !inst->paused || !inst->pVoice) return;
+    HRESULT hr = inst->pVoice->Start(0);
+    if (FAILED(hr)) {
+        DbgPrint("BS: XAudio2 resume failed: hr=0x%08X\n", (unsigned)hr);
+        return;
+    }
+    inst->paused = false;
 }
 
 static void xdkPauseSound(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
-
     if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
-        XdkSoundInstance* inst = findById(xa, soundOrInstance);
-        if (inst) { inst->paused = true; if (inst->pVoice) inst->pVoice->Stop(); }
-    } else {
-        for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-            if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance) {
-                arr->instances[i].paused = true;
-                if (arr->instances[i].pVoice) arr->instances[i].pVoice->Stop();
-            }
-        }
+        xdkPauseInstance(findById(xa, soundOrInstance));
+        return;
+    }
+    if (soundOrInstance < 0) return;
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance)
+            xdkPauseInstance(&arr->instances[i]);
     }
 }
 
 static void xdkResumeSound(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
-
     if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
-        XdkSoundInstance* inst = findById(xa, soundOrInstance);
-        if (inst) { inst->paused = false; if (inst->pVoice) inst->pVoice->Start(0); }
-    } else {
-        for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-            if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance) {
-                arr->instances[i].paused = false;
-                if (arr->instances[i].pVoice) arr->instances[i].pVoice->Start(0);
-            }
-        }
+        xdkResumeInstance(findById(xa, soundOrInstance));
+        return;
+    }
+    if (soundOrInstance < 0) return;
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance)
+            xdkResumeInstance(&arr->instances[i]);
     }
 }
 
 static void xdkPauseAll(AudioSystem* audio) {
     XdkInstanceArray* arr = Instances((XdkAudioSystem*)audio);
-    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-        if (arr->instances[i].active) {
-            arr->instances[i].paused = true;
-            if (arr->instances[i].pVoice) arr->instances[i].pVoice->Stop();
-        }
-    }
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++)
+        xdkPauseInstance(&arr->instances[i]);
 }
 
 static void xdkResumeAll(AudioSystem* audio) {
     XdkInstanceArray* arr = Instances((XdkAudioSystem*)audio);
-    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-        if (arr->instances[i].active) {
-            arr->instances[i].paused = false;
-            if (arr->instances[i].pVoice) arr->instances[i].pVoice->Start(0);
-        }
-    }
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++)
+        xdkResumeInstance(&arr->instances[i]);
 }
 
 static void xdkApplyGainTarget(XdkAudioSystem* xa, AudioSystem* audio,
