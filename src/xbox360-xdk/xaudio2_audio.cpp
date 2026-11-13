@@ -189,6 +189,16 @@ static void xdkAudioUpdate(AudioSystem* audio, float deltaTime) {
 
 static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex);
 
+
+// Read little-endian WAV fields without alignment or signed-shift assumptions.
+static uint16_t xdkReadLE16(const uint8_t* p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+static uint32_t xdkReadLE32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t priority, bool loop) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (!xa->initialized) { DbgPrint("BS: audio not initialized\n"); return -1; }
@@ -267,59 +277,145 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         FILE* f = fopen(fullPath, "rb");
         free(fullPath);
         if (!f) { DbgPrint("BS: fopen failed for external audio\n"); return inst->instanceId; }
-        fseek(f, 0, SEEK_END);
-        oggSize = (int)ftell(f);
-        fseek(f, 0, SEEK_SET);
-        if (oggSize <= 0) { fclose(f); return inst->instanceId; }
-        oggData = (uint8_t*)malloc(oggSize);
-        fread(oggData, 1, oggSize, f);
+        if (fseek(f, 0, SEEK_END) != 0) { fclose(f); destroyInstance(inst); return -1; }
+        long fileLength = ftell(f);
+        if (fileLength <= 0 || fileLength > 0x7fffffffL || fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f); destroyInstance(inst); return -1;
+        }
+        oggSize = (int)fileLength;
+        oggData = (uint8_t*)malloc((size_t)oggSize);
+        if (!oggData) { fclose(f); destroyInstance(inst); return -1; }
+        size_t bytesRead = fread(oggData, 1, (size_t)oggSize, f);
         fclose(f);
+        if (bytesRead != (size_t)oggSize) {
+            free(oggData); destroyInstance(inst); return -1;
+        }
         freeOggData = true;
     }
 
-    // Detect format from header bytes
+    // Decode either checked PCM WAV or OGG/Vorbis.
     int channels = 0, sampleRate = 0, sampleCount = 0;
     short* pcm = NULL;
 
-    // Check if it's WAV (RIFF header) or OGG (OggS header)
-    if (oggSize >= 44 && oggData[0] == 'R' && oggData[1] == 'I' && oggData[2] == 'F' && oggData[3] == 'F') {
-        // WAV format — parse RIFF/WAVE header
-        // Bytes 22-23: channels (LE uint16)
-        // Bytes 24-27: sample rate (LE uint32)
-        // Bytes 34-35: bits per sample (LE uint16)
-        channels = (int)(oggData[22] | (oggData[23] << 8));
-        sampleRate = (int)(oggData[24] | (oggData[25] << 8) | (oggData[26] << 16) | (oggData[27] << 24));
-        int bitsPerSample = (int)(oggData[34] | (oggData[35] << 8));
+    if (!oggData || oggSize <= 0) {
+        if (freeOggData) free(oggData);
+        destroyInstance(inst);
+        return -1;
+    }
 
-        // Find "data" subchunk
-        int dataOffset = 12;
-        int dataSize = 0;
-        while (dataOffset + 8 <= oggSize) {
-            if (oggData[dataOffset] == 'd' && oggData[dataOffset+1] == 'a' &&
-                oggData[dataOffset+2] == 't' && oggData[dataOffset+3] == 'a') {
-                dataSize = (int)(oggData[dataOffset+4] | (oggData[dataOffset+5] << 8) |
-                                 (oggData[dataOffset+6] << 16) | (oggData[dataOffset+7] << 24));
-                dataOffset += 8;
-                break;
-            }
-            int chunkSize = (int)(oggData[dataOffset+4] | (oggData[dataOffset+5] << 8) |
-                                  (oggData[dataOffset+6] << 16) | (oggData[dataOffset+7] << 24));
-            dataOffset += 8 + chunkSize;
+    if (oggSize >= 12 && memcmp(oggData, "RIFF", 4) == 0) {
+        uint32_t riffBytes = xdkReadLE32(oggData + 4);
+        if (memcmp(oggData + 8, "WAVE", 4) != 0 || riffBytes < 4 ||
+            riffBytes > (uint32_t)(oggSize - 8)) {
+            DbgPrint("BS: invalid RIFF/WAVE header\n");
+            if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
         }
 
-        if (dataSize > 0 && bitsPerSample == 16 && channels > 0) {
-            sampleCount = dataSize / (channels * 2);
-            pcm = (short*)malloc(dataSize);
-            memcpy(pcm, oggData + dataOffset, dataSize);
-            // WAV stores little-endian PCM; Xbox 360 XAudio2 expects big-endian
-            for (int s = 0; s < sampleCount * channels; s++) {
-                uint16_t v = (uint16_t)pcm[s];
-                pcm[s] = (short)((v >> 8) | (v << 8));
+        size_t offset = 12;
+        size_t riffEnd = (size_t)riffBytes + 8;
+        uint16_t formatTag = 0, bitsPerSample = 0, blockAlign = 0, wavChannels = 0;
+        uint32_t wavRate = 0, dataSize = 0;
+        size_t dataOffset = 0;
+        bool haveFmt = false, haveData = false;
+
+        while (offset <= riffEnd && riffEnd - offset >= 8) {
+            const uint8_t* chunk = oggData + offset;
+            uint32_t chunkBytes = xdkReadLE32(chunk + 4);
+            size_t payload = offset + 8;
+            if ((size_t)chunkBytes > riffEnd - payload) break;
+
+            if (memcmp(chunk, "fmt ", 4) == 0) {
+                if (chunkBytes < 16) break;
+                formatTag = xdkReadLE16(oggData + payload);
+                wavChannels = xdkReadLE16(oggData + payload + 2);
+                wavRate = xdkReadLE32(oggData + payload + 4);
+                blockAlign = xdkReadLE16(oggData + payload + 12);
+                bitsPerSample = xdkReadLE16(oggData + payload + 14);
+                haveFmt = true;
+            } else if (memcmp(chunk, "data", 4) == 0) {
+                dataOffset = payload;
+                dataSize = chunkBytes;
+                haveData = true;
             }
-            DbgPrint("BS: WAV: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
-        } else {
-            DbgPrint("BS: WAV parse failed: bits=%d ch=%d dataSize=%d\n", bitsPerSample, channels, dataSize);
+
+            size_t paddedBytes = (size_t)chunkBytes + (chunkBytes & 1U);
+            if (paddedBytes > riffEnd - payload) {
+                if ((size_t)chunkBytes != riffEnd - payload) break;
+                offset = riffEnd;
+            } else {
+                offset = payload + paddedBytes;
+            }
+        }
+
+        if (!haveFmt || !haveData || formatTag != 1 || bitsPerSample != 16 ||
+            wavChannels == 0 || wavChannels > 2 || wavRate == 0 ||
+            blockAlign != (uint16_t)(wavChannels * 2) ||
+            dataOffset > (size_t)oggSize || dataSize > (size_t)oggSize - dataOffset ||
+            dataSize == 0 || (dataSize % blockAlign) != 0 ||
+            dataSize > 0x7fffffffU) {
+            DbgPrint("BS: unsupported or malformed PCM WAV\n");
             if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
+        }
+
+        channels = (int)wavChannels;
+        sampleRate = (int)wavRate;
+        sampleCount = (int)(dataSize / blockAlign);
+        pcm = (short*)malloc((size_t)dataSize);
+        if (!pcm) {
+            if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
+        }
+        memcpy(pcm, oggData + dataOffset, (size_t)dataSize);
+        for (uint32_t sample = 0; sample < dataSize / 2; ++sample) {
+            uint16_t value = (uint16_t)pcm[sample];
+            pcm[sample] = (short)((value >> 8) | (value << 8));
+        }
+        DbgPrint("BS: WAV: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
+    } else {
+        int stbErr = 0;
+        stb_vorbis* vorbis = stb_vorbis_open_memory(oggData, oggSize, &stbErr, NULL);
+        if (!vorbis) {
+            DbgPrint("BS: vorbis open failed: err=%d size=%d\n", stbErr, oggSize);
+            if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
+        }
+        stb_vorbis_info info = stb_vorbis_get_info(vorbis);
+        int totalSamples = stb_vorbis_stream_length_in_samples(vorbis);
+        channels = info.channels;
+        sampleRate = (int)info.sample_rate;
+        if (channels <= 0 || channels > 2 || sampleRate <= 0 || totalSamples <= 0 ||
+            (unsigned long long)totalSamples * (unsigned long long)channels * sizeof(short) > 0x7fffffffULL) {
+            stb_vorbis_close(vorbis);
+            if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
+        }
+        size_t pcmBytes = (size_t)totalSamples * (size_t)channels * sizeof(short);
+        pcm = (short*)malloc(pcmBytes);
+        if (!pcm) {
+            stb_vorbis_close(vorbis);
+            if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
+        }
+        sampleCount = stb_vorbis_get_samples_short_interleaved(vorbis, channels, pcm, totalSamples * channels);
+        stb_vorbis_close(vorbis);
+        if (sampleCount <= 0) {
+            free(pcm);
+            if (freeOggData) free(oggData);
+            destroyInstance(inst);
+            return -1;
+        }
+        DbgPrint("BS: OGG: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
+    }
+
+    if (freeOggData) free(oggData);
             return inst->instanceId;
         }
     } else {
@@ -343,9 +439,10 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
 
     if (freeOggData) free(oggData);
 
-    if (sampleCount <= 0 || !pcm) {
+    if (sampleCount <= 0 || !pcm || sampleRate <= 0 || channels <= 0 || channels > 2) {
         free(pcm);
-        return inst->instanceId;
+        destroyInstance(inst);
+        return -1;
     }
 
     inst->sampleRate = (uint32_t)sampleRate;
@@ -376,9 +473,8 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     HRESULT hr = pXA->CreateSourceVoice(&inst->pVoice, (WAVEFORMATEX*)&wfx);
     if (FAILED(hr) || !inst->pVoice) {
         DbgPrint("BS: CreateSourceVoice failed: hr=0x%08X\n", (unsigned)hr);
-        free(inst->pcmData);
-        inst->pcmData = NULL;
-        return inst->instanceId;
+        destroyInstance(inst);
+        return -1;
     }
 
     // Submit PCM buffer
@@ -395,11 +491,15 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     hr = inst->pVoice->SubmitSourceBuffer(&buf);
     if (FAILED(hr)) {
         DbgPrint("BS: SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+        return -1;
     }
     inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain);
     hr = inst->pVoice->Start(0);
     if (FAILED(hr)) {
         DbgPrint("BS: Start failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+        return -1;
     }
 
     return inst->instanceId;
