@@ -124,8 +124,10 @@ static bool xdkApplyInstancePitch(XdkSoundInstance* inst, float pitch) {
 static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (inst && inst->pVoice) {
-        float groupGain = AudioSystem_soundGroupGain(audio, inst->soundIndex);
-        inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain * groupGain);
+        float groupGain = inst->soundIndex >= 0
+            ? AudioSystem_soundGroupGain(audio, inst->soundIndex) : 1.0f;
+        HRESULT hr = inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain * groupGain);
+        if (FAILED(hr)) DbgPrint("BS: SetVolume update failed: hr=0x%08X\n", (unsigned)hr);
     }
 }
 
@@ -885,8 +887,121 @@ static bool xdkDestroyStream(AudioSystem* audio, int32_t streamIndex) {
 }
 
 static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t bytes, bool loop) {
-    (void)audio; (void)data; (void)bytes; (void)loop;
-    return -1; // The modern encoded-voice path requires a separate decoder/voice owner.
+    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
+    if (!xa || !xa->initialized || !data || bytes == 0 || bytes > 0x7fffffffU) return -1;
+
+    int stbErr = 0;
+    stb_vorbis* vorbis = stb_vorbis_open_memory(data, (int)bytes, &stbErr, NULL);
+    if (!vorbis) {
+        DbgPrint("BS: playEncoded vorbis open failed: err=%d size=%u\n", stbErr, (unsigned)bytes);
+        return -1;
+    }
+
+    stb_vorbis_info info = stb_vorbis_get_info(vorbis);
+    unsigned int totalSamples = stb_vorbis_stream_length_in_samples(vorbis);
+    if (info.channels < 1 || info.channels > 2 || info.sample_rate == 0 ||
+        totalSamples == 0 || totalSamples > (unsigned int)(0x7fffffff / (info.channels * (int)sizeof(short)))) {
+        stb_vorbis_close(vorbis);
+        DbgPrint("BS: playEncoded unsupported stream metadata\n");
+        return -1;
+    }
+
+    size_t pcmCapacity = (size_t)totalSamples * (size_t)info.channels * sizeof(short);
+    short* pcm = (short*)malloc(pcmCapacity);
+    if (!pcm) {
+        stb_vorbis_close(vorbis);
+        return -1;
+    }
+    int sampleCount = stb_vorbis_get_samples_short_interleaved(
+        vorbis, info.channels, pcm, (int)(totalSamples * (unsigned int)info.channels));
+    stb_vorbis_close(vorbis);
+    if (sampleCount <= 0) {
+        free(pcm);
+        return -1;
+    }
+
+    size_t pcmBytes = (size_t)sampleCount * (size_t)info.channels * sizeof(short);
+    if (pcmBytes == 0 || pcmBytes > 0x7fffffffU) {
+        free(pcm);
+        return -1;
+    }
+
+    XdkSoundInstance* inst = findFreeSlot(xa);
+    if (!inst) {
+        free(pcm);
+        return -1;
+    }
+    int32_t instanceId = allocateInstanceId(xa);
+    if (instanceId < 0) {
+        free(pcm);
+        return -1;
+    }
+
+    memset(inst, 0, sizeof(*inst));
+    inst->active = true;
+    inst->soundIndex = -1; // Encoded FMOD voices are not tied to a SOND entry.
+    inst->instanceId = instanceId;
+    inst->loop = loop;
+    inst->pitch = 1.0f;
+    inst->sondPitch = 1.0f;
+    inst->sondVolume = 1.0f;
+    inst->currentGain = inst->targetGain = inst->startGain = 1.0f;
+    inst->sampleRate = info.sample_rate;
+    inst->channels = (uint16_t)info.channels;
+    inst->pcmData = (uint8_t*)pcm;
+    inst->pcmSize = (uint32_t)pcmBytes;
+
+    WAVEFORMATEXTENSIBLE wfx;
+    memset(&wfx, 0, sizeof(wfx));
+    wfx.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    wfx.Format.nChannels = (WORD)info.channels;
+    wfx.Format.nSamplesPerSec = info.sample_rate;
+    wfx.Format.wBitsPerSample = 16;
+    wfx.Format.nBlockAlign = (WORD)(info.channels * 2);
+    wfx.Format.nAvgBytesPerSec = info.sample_rate * info.channels * 2;
+    wfx.Format.cbSize = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+    wfx.Samples.wValidBitsPerSample = 16;
+    wfx.dwChannelMask = info.channels == 1
+        ? SPEAKER_FRONT_CENTER : (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT);
+    wfx.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+
+    IXAudio2* pXA = (IXAudio2*)xa->pXAudio2;
+    HRESULT hr = pXA->CreateSourceVoice(&inst->pVoice, (WAVEFORMATEX*)&wfx);
+    if (FAILED(hr) || !inst->pVoice) {
+        DbgPrint("BS: playEncoded CreateSourceVoice failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+        return -1;
+    }
+
+    XAUDIO2_BUFFER buffer;
+    memset(&buffer, 0, sizeof(buffer));
+    buffer.Flags = loop ? 0 : XAUDIO2_END_OF_STREAM;
+    buffer.AudioBytes = inst->pcmSize;
+    buffer.pAudioData = inst->pcmData;
+    if (loop) buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+
+    hr = inst->pVoice->SubmitSourceBuffer(&buffer);
+    if (FAILED(hr)) {
+        DbgPrint("BS: playEncoded SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+        return -1;
+    }
+    hr = inst->pVoice->SetVolume(xa->masterGain);
+    if (FAILED(hr) || !xdkApplyInstancePitch(inst, 1.0f)) {
+        DbgPrint("BS: playEncoded voice state setup failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+        return -1;
+    }
+    hr = inst->pVoice->Start(0);
+    if (FAILED(hr)) {
+        DbgPrint("BS: playEncoded Start failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+        return -1;
+    }
+
+    DbgPrint("BS: playEncoded started id=%d ch=%d rate=%u samples=%d loop=%d\n",
+             instanceId, info.channels, info.sample_rate, sampleCount, loop ? 1 : 0);
+    return instanceId;
 }
 
 // ===[ Vtable ]===
