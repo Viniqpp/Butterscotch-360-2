@@ -842,10 +842,12 @@ static void xdkSetTrackPosition(AudioSystem* audio, int32_t soundOrInstance, flo
         destroyInstance(inst);
         return;
     }
-    hr = inst->pVoice->Start(0);
-    if (FAILED(hr)) {
-        DbgPrint("BS: seek Start failed: hr=0x%08X\n", (unsigned)hr);
-        destroyInstance(inst);
+    if (!inst->paused) {
+        hr = inst->pVoice->Start(0);
+        if (FAILED(hr)) {
+            DbgPrint("BS: seek Start failed: hr=0x%08X\n", (unsigned)hr);
+            destroyInstance(inst);
+        }
     }
 }
 
