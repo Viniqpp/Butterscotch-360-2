@@ -80,11 +80,20 @@ static void destroyInstance(XdkSoundInstance* inst) {
     inst->active = false;
 }
 
+
+static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
+    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
+    if (inst && inst->pVoice) {
+        float groupGain = AudioSystem_soundGroupGain(audio, inst->soundIndex);
+        inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain * groupGain);
+    }
+}
+
 // ===[ Vtable Implementations ]===
 
 static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileSystem) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    xa->base.dataWin = dataWin;
+    xa->base.dw = dataWin;
     xa->fileSystem = fileSystem;
     xa->masterGain = 1.0f;
 
@@ -127,6 +136,7 @@ static void xdkAudioUpdate(AudioSystem* audio, float deltaTime) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (!xa->initialized) return;
 
+    bool groupGainsChanged = AudioSystem_updateGroupGains(audio, deltaTime);
     XdkInstanceArray* arr = Instances(xa);
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
         XdkSoundInstance* inst = &arr->instances[i];
@@ -143,7 +153,7 @@ static void xdkAudioUpdate(AudioSystem* audio, float deltaTime) {
                 inst->currentGain = inst->startGain + (inst->targetGain - inst->startGain) * t;
             }
             if (inst->pVoice) {
-                inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain);
+                xdkApplyInstanceVolume(audio, inst);
             }
         }
 
@@ -152,6 +162,8 @@ static void xdkAudioUpdate(AudioSystem* audio, float deltaTime) {
             inst->active = false;
             continue;
         }
+
+        if (groupGainsChanged) xdkApplyInstanceVolume(audio, inst);
 
         // Check if playback finished
         XAUDIO2_VOICE_STATE state;
@@ -166,7 +178,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (!xa->initialized) { DbgPrint("BS: audio not initialized\n"); return -1; }
 
-    DataWin* dw = xa->base.dataWin;
+    DataWin* dw = xa->base.dw;
     if (soundIndex < 0 || (uint32_t)soundIndex >= dw->sond.count) return -1;
 
     XdkSoundInstance* inst = findFreeSlot(xa);
@@ -481,7 +493,7 @@ static void xdkSetSoundGain(AudioSystem* audio, int32_t soundOrInstance, float g
         inst->currentGain = gain;
         inst->targetGain = gain;
         inst->fadeTimeRemaining = 0.0f;
-        if (inst->pVoice) inst->pVoice->SetVolume(gain * inst->sondVolume * xa->masterGain);
+        xdkApplyInstanceVolume(audio, inst);
     } else {
         inst->startGain = inst->currentGain;
         inst->targetGain = gain;
@@ -540,6 +552,10 @@ static void xdkSetTrackPosition(AudioSystem* audio, int32_t soundOrInstance, flo
 static void xdkSetMasterGain(AudioSystem* audio, float gain) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     xa->masterGain = gain;
+    XdkInstanceArray* arr = Instances(xa);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        if (arr->instances[i].active) xdkApplyInstanceVolume(audio, &arr->instances[i]);
+    }
 }
 
 static void xdkSetChannelCount(AudioSystem* audio, int32_t count) {
@@ -555,36 +571,118 @@ static bool xdkGroupIsLoaded(AudioSystem* audio, int32_t groupIndex) {
     return true;
 }
 
+
+static void xdkSetSoundSpatial(AudioSystem* audio, int32_t instanceId,
+                               float x, float y, float z, float vx, float vy, float vz,
+                               float ref, float max, float factor) {
+    // XAudio2 spatial routing is not configured by this stereo backend yet.
+    (void)audio; (void)instanceId; (void)x; (void)y; (void)z;
+    (void)vx; (void)vy; (void)vz; (void)ref; (void)max; (void)factor;
+}
+
+static void xdkSetListenerPosition(AudioSystem* audio, float x, float y, float z) {
+    audio->listenerX = x;
+    audio->listenerY = y;
+    audio->listenerZ = z;
+}
+
+static void xdkSuspend(AudioSystem* audio) {
+    xdkPauseAll(audio);
+}
+
+static void xdkResume(AudioSystem* audio) {
+    xdkResumeAll(audio);
+}
+
+static float xdkGetSoundLength(AudioSystem* audio, int32_t soundOrInstance) {
+    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
+    XdkSoundInstance* inst = soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE
+        ? findById(xa, soundOrInstance) : NULL;
+    if (!inst && soundOrInstance >= 0 && audio->dw &&
+        (uint32_t)soundOrInstance < audio->dw->sond.count) {
+        XdkInstanceArray* arr = Instances(xa);
+        for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+            if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance) {
+                inst = &arr->instances[i];
+                break;
+            }
+        }
+    }
+    if (!inst || inst->sampleRate == 0 || inst->channels == 0) return 0.0f;
+    return (float)inst->pcmSize / ((float)inst->sampleRate * (float)inst->channels * 2.0f);
+}
+
+static void xdkSetMasterGainForListener(AudioSystem* audio, float gain, int32_t listenerId) {
+    (void)listenerId;
+    xdkSetMasterGain(audio, gain);
+}
+
+static void xdkSetGroupGain(AudioSystem* audio, int32_t groupIndex, float gain, uint32_t timeMs) {
+    AudioSystem_setGroupGain(audio, groupIndex, gain, timeMs);
+}
+
+static int32_t xdkCreateStream(AudioSystem* audio, const char* filename) {
+    (void)audio; (void)filename;
+    return -1; // Stream voices are not implemented by this decoder-backed adapter.
+}
+
+static bool xdkDestroyStream(AudioSystem* audio, int32_t streamIndex) {
+    (void)audio; (void)streamIndex;
+    return false;
+}
+
+static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t bytes, bool loop) {
+    (void)audio; (void)data; (void)bytes; (void)loop;
+    return -1; // The modern encoded-voice path requires a separate decoder/voice owner.
+}
+
 // ===[ Vtable ]===
 
-static AudioSystemVtable xdkAudioVtable = {
-    xdkAudioInit,
-    xdkAudioDestroy,
-    xdkAudioUpdate,
-    xdkPlaySound,
-    xdkStopSound,
-    xdkStopAll,
-    xdkIsPlaying,
-    xdkPauseSound,
-    xdkResumeSound,
-    xdkPauseAll,
-    xdkResumeAll,
-    xdkSetSoundGain,
-    xdkGetSoundGain,
-    xdkSetSoundPitch,
-    xdkGetSoundPitch,
-    xdkGetTrackPosition,
-    xdkSetTrackPosition,
-    xdkSetMasterGain,
-    xdkSetChannelCount,
-    xdkGroupLoad,
-    xdkGroupIsLoaded,
-};
+static AudioSystemVtable xdkAudioVtable;
+static bool xdkAudioVtableInitialized = false;
+
+static void xdkInitializeAudioVtable(void) {
+    if (xdkAudioVtableInitialized) return;
+    memset(&xdkAudioVtable, 0, sizeof(xdkAudioVtable));
+    xdkAudioVtable.init = xdkAudioInit;
+    xdkAudioVtable.destroy = xdkAudioDestroy;
+    xdkAudioVtable.update = xdkAudioUpdate;
+    xdkAudioVtable.playSound = xdkPlaySound;
+    xdkAudioVtable.setSoundSpatial = xdkSetSoundSpatial;
+    xdkAudioVtable.setListenerPosition = xdkSetListenerPosition;
+    xdkAudioVtable.stopSound = xdkStopSound;
+    xdkAudioVtable.stopAll = xdkStopAll;
+    xdkAudioVtable.isPlaying = xdkIsPlaying;
+    xdkAudioVtable.pauseSound = xdkPauseSound;
+    xdkAudioVtable.resumeSound = xdkResumeSound;
+    xdkAudioVtable.pauseAll = xdkPauseAll;
+    xdkAudioVtable.resumeAll = xdkResumeAll;
+    xdkAudioVtable.suspend = xdkSuspend;
+    xdkAudioVtable.resume = xdkResume;
+    xdkAudioVtable.setSoundGain = xdkSetSoundGain;
+    xdkAudioVtable.getSoundGain = xdkGetSoundGain;
+    xdkAudioVtable.setSoundPitch = xdkSetSoundPitch;
+    xdkAudioVtable.getSoundPitch = xdkGetSoundPitch;
+    xdkAudioVtable.getTrackPosition = xdkGetTrackPosition;
+    xdkAudioVtable.setTrackPosition = xdkSetTrackPosition;
+    xdkAudioVtable.getSoundLength = xdkGetSoundLength;
+    xdkAudioVtable.setMasterGain = xdkSetMasterGain;
+    xdkAudioVtable.setMasterGainForListener = xdkSetMasterGainForListener;
+    xdkAudioVtable.setChannelCount = xdkSetChannelCount;
+    xdkAudioVtable.setGroupGain = xdkSetGroupGain;
+    xdkAudioVtable.groupLoad = xdkGroupLoad;
+    xdkAudioVtable.groupIsLoaded = xdkGroupIsLoaded;
+    xdkAudioVtable.createStream = xdkCreateStream;
+    xdkAudioVtable.destroyStream = xdkDestroyStream;
+    xdkAudioVtable.playEncoded = xdkPlayEncoded;
+    xdkAudioVtableInitialized = true;
+}
 
 // ===[ Public API ]===
 
 XdkAudioSystem* XdkAudioSystem_create(void) {
     XdkAudioSystem* xa = (XdkAudioSystem*)calloc(1, sizeof(XdkAudioSystem));
+    xdkInitializeAudioVtable();
     xa->base.vtable = &xdkAudioVtable;
     xa->masterGain = 1.0f;
     xa->instanceData = calloc(1, sizeof(XdkInstanceArray));
