@@ -1009,10 +1009,15 @@ static void d3d9DrawSpriteTiled(Renderer* renderer, int32_t tpagIndex, float ori
     float stepX = (float)t->sourceWidth * (xs < 0 ? -xs : xs);
     float stepY = (float)t->sourceHeight * (ys < 0 ? -ys : ys);
     if (stepX <= 0.0f || stepY <= 0.0f) return;
-    int nx = tileX ? (int)(roomW / stepX) + 1 : 1;
-    int ny = tileY ? (int)(roomH / stepY) + 1 : 1;
-    if (nx > 128) nx = 128;
-    if (ny > 128) ny = 128;
+    int nx = 1, ny = 1;
+    if (tileX && roomW > 0.0f) {
+        float countX = roomW / stepX;
+        nx = countX >= 127.0f ? 128 : (int)countX + 1;
+    }
+    if (tileY && roomH > 0.0f) {
+        float countY = roomH / stepY;
+        ny = countY >= 127.0f ? 128 : (int)countY + 1;
+    }
     for (int iy = 0; iy < ny; iy++) for (int ix = 0; ix < nx; ix++) {
         float dx = x + (tileX ? ix * stepX : 0.0f);
         float dy = y + (tileY ? iy * stepY : 0.0f);
