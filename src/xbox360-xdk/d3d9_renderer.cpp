@@ -142,10 +142,11 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 
     HRESULT hr = D3DXCompileShader(g_vsSource, (UINT)strlen(g_vsSource),
                                    NULL, NULL, "main", "vs_2_0", 0, &pCode, &pErr, NULL);
-    if (FAILED(hr)) {
+    if (FAILED(hr) || !pCode) {
         OutputDebugStringA("VS compile failed: ");
         if (pErr) OutputDebugStringA((const char*)pErr->GetBufferPointer());
         if (pErr) pErr->Release();
+        if (pCode) pCode->Release();
         return;
     }
     hr = dev->CreateVertexShader((const DWORD*)pCode->GetBufferPointer(),
@@ -159,10 +160,11 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 
     hr = D3DXCompileShader(g_psSource, (UINT)strlen(g_psSource),
                            NULL, NULL, "main", "ps_2_0", 0, &pCode, &pErr, NULL);
-    if (FAILED(hr)) {
+    if (FAILED(hr) || !pCode) {
         OutputDebugStringA("PS compile failed: ");
         if (pErr) OutputDebugStringA((const char*)pErr->GetBufferPointer());
         if (pErr) pErr->Release();
+        if (pCode) pCode->Release();
         return;
     }
     hr = dev->CreatePixelShader((const DWORD*)pCode->GetBufferPointer(),
