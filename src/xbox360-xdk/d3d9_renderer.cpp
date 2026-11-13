@@ -916,6 +916,7 @@ static void d3d9SetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
                                  int32_t portW, int32_t portH, bool renderingToUserSurface) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     (void)renderingToUserSurface;
+    flushBatch(dr);
     dr->offsetX = dr->offsetY = 0.0f;
     dr->portScaleX = guiW > 0 ? (float)portW / (float)guiW : 1.0f;
     dr->portScaleY = guiH > 0 ? (float)portH / (float)guiH : 1.0f;
@@ -1113,6 +1114,7 @@ static bool d3d9GpuGetAlphaTestEnable(Renderer* r) {
 }
 
 static void d3d9GpuSetBlendEnable(Renderer* r, bool enable) {
+    flushBatch((D3D9Renderer*)r);
     Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_ALPHABLENDENABLE, enable ? TRUE : FALSE);
 }
 static bool d3d9GpuGetBlendEnable(Renderer* r) {
@@ -1121,18 +1123,22 @@ static bool d3d9GpuGetBlendEnable(Renderer* r) {
     return value != FALSE;
 }
 static void d3d9GpuSetTexFilter(Renderer* r, bool enable) {
+    flushBatch((D3D9Renderer*)r);
     IDirect3DDevice9* d = Dev((D3D9Renderer*)r);
     DWORD f = enable ? D3DTEXF_LINEAR : D3DTEXF_POINT;
     d->SetSamplerState(0, D3DSAMP_MINFILTER, f);
     d->SetSamplerState(0, D3DSAMP_MAGFILTER, f);
 }
 static void d3d9GpuSetAlphaTestEnable(Renderer* r, bool enable) {
+    flushBatch((D3D9Renderer*)r);
     Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_ALPHATESTENABLE, enable ? TRUE : FALSE);
 }
 static void d3d9GpuSetAlphaTestRef(Renderer* r, uint8_t ref) {
+    flushBatch((D3D9Renderer*)r);
     Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_ALPHAREF, ref);
 }
 static void d3d9GpuSetColorWriteEnable(Renderer* r, bool red, bool green, bool blue, bool alpha) {
+    flushBatch((D3D9Renderer*)r);
     DWORD mask = (red ? D3DCOLORWRITEENABLE_RED : 0) |
                  (green ? D3DCOLORWRITEENABLE_GREEN : 0) |
                  (blue ? D3DCOLORWRITEENABLE_BLUE : 0) |
@@ -1166,6 +1172,7 @@ static DWORD d3d9MapBlendFactor(int32_t factor) {
 
 static void d3d9GpuSetBlendMode(Renderer* r, int32_t mode) {
     if (mode == bm_complex) return;
+    flushBatch((D3D9Renderer*)r);
     IDirect3DDevice9* d = Dev((D3D9Renderer*)r);
     DWORD src = D3DBLEND_SRCALPHA, dst = D3DBLEND_INVSRCALPHA;
     DWORD op = D3DBLENDOP_ADD;
@@ -1211,6 +1218,7 @@ static void d3d9GpuSetBlendMode(Renderer* r, int32_t mode) {
 }
 
 static void d3d9GpuSetBlendModeExt(Renderer* r, int32_t sf, int32_t df, int32_t sfa, int32_t dfa) {
+    flushBatch((D3D9Renderer*)r);
     IDirect3DDevice9* d = Dev((D3D9Renderer*)r);
     DWORD src = d3d9MapBlendFactor(sf);
     DWORD dst = d3d9MapBlendFactor(df);
@@ -1232,6 +1240,7 @@ static void d3d9GpuSetBlendModeExt(Renderer* r, int32_t sf, int32_t df, int32_t 
     r->blendFactors.dstAlpha = dfa;
 }
 static void d3d9ClearScreen(Renderer* r, uint32_t color, float alpha) {
+    flushBatch((D3D9Renderer*)r);
     float cr, cg, cb, ca;
     bgrToFloatColor(color, alpha, &cr, &cg, &cb, &ca);
     DWORD packed = D3DCOLOR_ARGB((DWORD)(ca * 255.0f), (DWORD)(cr * 255.0f),
