@@ -361,15 +361,22 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         uint32_t wavRate = 0, dataSize = 0;
         size_t dataOffset = 0;
         bool haveFmt = false, haveData = false;
+        bool malformedChunk = false;
 
         while (offset <= riffEnd && riffEnd - offset >= 8) {
             const uint8_t* chunk = oggData + offset;
             uint32_t chunkBytes = xdkReadLE32(chunk + 4);
             size_t payload = offset + 8;
-            if ((size_t)chunkBytes > riffEnd - payload) break;
+            if ((size_t)chunkBytes > riffEnd - payload) {
+                malformedChunk = true;
+                break;
+            }
 
             if (memcmp(chunk, "fmt ", 4) == 0) {
-                if (chunkBytes < 16) break;
+                if (haveFmt || chunkBytes < 16) {
+                    malformedChunk = true;
+                    break;
+                }
                 formatTag = xdkReadLE16(oggData + payload);
                 wavChannels = xdkReadLE16(oggData + payload + 2);
                 wavRate = xdkReadLE32(oggData + payload + 4);
@@ -377,6 +384,10 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
                 bitsPerSample = xdkReadLE16(oggData + payload + 14);
                 haveFmt = true;
             } else if (memcmp(chunk, "data", 4) == 0) {
+                if (haveData) {
+                    malformedChunk = true;
+                    break;
+                }
                 dataOffset = payload;
                 dataSize = chunkBytes;
                 haveData = true;
@@ -384,14 +395,14 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
 
             size_t paddedBytes = (size_t)chunkBytes + (chunkBytes & 1U);
             if (paddedBytes > riffEnd - payload) {
-                if ((size_t)chunkBytes != riffEnd - payload) break;
-                offset = riffEnd;
-            } else {
-                offset = payload + paddedBytes;
+                malformedChunk = true;
+                break;
             }
+            offset = payload + paddedBytes;
         }
+        if (offset != riffEnd) malformedChunk = true;
 
-        if (!haveFmt || !haveData || formatTag != 1 || bitsPerSample != 16 ||
+        if (malformedChunk || !haveFmt || !haveData || formatTag != 1 || bitsPerSample != 16 ||
             wavChannels == 0 || wavChannels > 2 || wavRate == 0 ||
             blockAlign != (uint16_t)(wavChannels * 2) ||
             dataOffset > (size_t)oggSize || dataSize > (size_t)oggSize - dataOffset ||
