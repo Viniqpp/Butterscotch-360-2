@@ -528,6 +528,11 @@ static void d3d9DrawSpritePart(Renderer* renderer, int32_t tpagIndex,
     setVertex(&v[3], x0, y1, u0, v1, cr, cg, cb, ca);
 }
 
+static void d3d9DrawLine(Renderer* renderer, float x1, float y1, float x2, float y2,
+                           float width, uint32_t color, float alpha);
+static void d3d9DrawLineColor(Renderer* renderer, float x1, float y1, float x2, float y2,
+                              float width, uint32_t color1, uint32_t color2, float alpha);
+
 // Exact modern drawSpritePart contract. The pivot is in game coordinates;
 // the source rectangle remains floating-point through UV calculation.
 static void d3d9DrawSpritePartModern(Renderer* renderer, int32_t tpagIndex,
