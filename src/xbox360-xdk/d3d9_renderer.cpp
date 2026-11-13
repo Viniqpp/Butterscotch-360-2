@@ -72,7 +72,9 @@ static inline void bgrToFloatColor(uint32_t bgr, float alpha, float* outR, float
 // ===[ Batch Flush ]===
 
 static void flushBatch(D3D9Renderer* dr) {
-    if (!dr || !dr->vertexData || !dr->triangleData || !dr->pd3dDevice || dr->quadCount == 0) return;
+    if (!dr) return;
+    if (!dr->sceneActive) { dr->quadCount = 0; return; }
+    if (!dr->vertexData || !dr->triangleData || !dr->pd3dDevice || dr->quadCount == 0) return;
 
     IDirect3DDevice9* dev = Dev(dr);
     IDirect3DBaseTexture9* texture = dr->whiteTexture
@@ -407,11 +409,13 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     }
 
     dr->skipNextClearScreen = false;
+    dr->sceneActive = false;
     HRESULT sceneHr = dev->BeginScene();
     if (FAILED(sceneHr)) {
-        DbgPrint("BS: D3D9 BeginScene failed: hr=0x%08X\n", (unsigned)sceneHr);
+        DbgPrint("BS: D3D9 BeginScene failed: hr=0x%08X\\n", (unsigned)sceneHr);
         return;
     }
+    dr->sceneActive = true;
 
     // Set shared render state
     dev->SetVertexShader((IDirect3DVertexShader9*)dr->pVertexShader);
