@@ -878,9 +878,16 @@ static void xdkInitializeAudioVtable(void) {
 
 XdkAudioSystem* XdkAudioSystem_create(void) {
     XdkAudioSystem* xa = (XdkAudioSystem*)calloc(1, sizeof(XdkAudioSystem));
+    if (!xa) return NULL;
+
+    xa->instanceData = calloc(1, sizeof(XdkInstanceArray));
+    if (!xa->instanceData) {
+        free(xa);
+        return NULL;
+    }
+
     xdkInitializeAudioVtable();
     xa->base.vtable = &xdkAudioVtable;
     xa->masterGain = 1.0f;
-    xa->instanceData = calloc(1, sizeof(XdkInstanceArray));
     return xa;
 }
