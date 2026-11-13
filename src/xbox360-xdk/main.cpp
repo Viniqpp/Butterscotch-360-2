@@ -68,7 +68,7 @@ static void setupDefaultMappings(void) {
     xpadMappings = (XpadMapping*)malloc(sizeof(defaults));
     if (!xpadMappings) {
         xpadMappingCount = 0;
-        DbgPrint("BS: default controller mapping allocation failed\\n");
+        DbgPrint("BS: default controller mapping allocation failed\n");
         return;
     }
     memcpy(xpadMappings, defaults, sizeof(defaults));
@@ -155,11 +155,11 @@ static void platformSwapBuffers(D3D9Renderer* renderer) {
     if (renderer->sceneActive) {
         HRESULT hr = device->EndScene();
         renderer->sceneActive = false;
-        if (FAILED(hr)) DbgPrint("BS: EndScene failed: 0x%08X\\n", (unsigned)hr);
+        if (FAILED(hr)) DbgPrint("BS: EndScene failed: 0x%08X\n", (unsigned)hr);
     }
 
     HRESULT hr = device->Present(NULL, NULL, NULL, NULL);
-    if (FAILED(hr)) DbgPrint("BS: Present failed: 0x%08X\\n", (unsigned)hr);
+    if (FAILED(hr)) DbgPrint("BS: Present failed: 0x%08X\n", (unsigned)hr);
 }
 
 static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
@@ -401,7 +401,7 @@ VOID __cdecl main() {
     int32_t gameH = (int32_t)gen8->defaultWindowHeight;
     DbgPrint("BS: gameW=%d gameH=%d screenW=%d screenH=%d\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    DbgPrint("BS: entering modern main loop\\n");
+    DbgPrint("BS: entering modern main loop\n");
 
     LARGE_INTEGER freq, lastTime, currentTime;
     if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 ||
@@ -516,6 +516,6 @@ VOID __cdecl main() {
     }
 
     // ===[ Cleanup ]===
-    DbgPrint("BS: shutting down runner\\n");
+    DbgPrint("BS: shutting down runner\n");
     shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
 }
