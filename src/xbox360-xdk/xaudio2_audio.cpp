@@ -12,6 +12,7 @@
 
 // Core headers — compiled as C++ alongside the .c files (via /TP flag)
 #include "utils.h"
+#include "fmod/fmod.h"
 #include "xaudio2_audio.h"
 
 extern "C" unsigned long __cdecl DbgPrint(const char* format, ...);
@@ -118,6 +119,10 @@ static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileS
 }
 
 static void xdkAudioDestroy(AudioSystem* audio) {
+    // FMOD banks/events may own decoded samples used by audio voices. Release
+    // them before tearing down XAudio2 instances and the file/group resources.
+    Fmod_audioDestroy(audio);
+
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
 
