@@ -360,13 +360,39 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         if (!hasExt) memcpy(filename + fileLen, ".ogg", 5);
         else filename[fileLen] = '\0';
 
-        int32_t binarySize = 0;
-        if (!xa->fileSystem->vtable->readFileBinary(
-                xa->fileSystem, filename, &oggData, &binarySize) ||
-            !oggData || binarySize <= 0 ||
-            (uint32_t)binarySize > XDK_MAX_ENCODED_AUDIO_BYTES) {
-            if (oggData) free(oggData);
-            DbgPrint("BS: FileSystem could not read external audio %s\n", filename);
+        FileSystem* fs = xa->fileSystem;
+        void* handle = fs->vtable->binaryOpen(fs, filename, GML_FILE_BIN_READ);
+        if (!handle) {
+            DbgPrint("BS: FileSystem could not open external audio %s\n", filename);
+            destroyInstance(inst);
+            return -1;
+        }
+        int32_t binarySize = fs->vtable->binarySize(fs, handle);
+        if (binarySize <= 0 || (uint32_t)binarySize > XDK_MAX_ENCODED_AUDIO_BYTES) {
+            fs->vtable->binaryClose(fs, handle);
+            DbgPrint("BS: external audio size is invalid or over budget (%d)\n", binarySize);
+            destroyInstance(inst);
+            return -1;
+        }
+        oggData = (uint8_t*)malloc((size_t)binarySize);
+        if (!oggData) {
+            fs->vtable->binaryClose(fs, handle);
+            destroyInstance(inst);
+            return -1;
+        }
+        int32_t totalRead = 0;
+        while (totalRead < binarySize) {
+            int32_t remaining = binarySize - totalRead;
+            int32_t bytesRead = fs->vtable->binaryRead(fs, handle, oggData + totalRead, remaining);
+            if (bytesRead <= 0 || bytesRead > remaining) break;
+            totalRead += bytesRead;
+        }
+        fs->vtable->binaryClose(fs, handle);
+        if (totalRead != binarySize) {
+            free(oggData);
+            oggData = NULL;
+            DbgPrint("BS: short FileSystem read for external audio %s (%d/%d)\n",
+                     filename, totalRead, binarySize);
             destroyInstance(inst);
             return -1;
         }
