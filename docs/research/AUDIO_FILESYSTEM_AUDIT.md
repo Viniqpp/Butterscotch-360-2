@@ -24,6 +24,16 @@ The active Visual Studio Xbox 360 project compiles `src/xbox360-xdk/xaudio2_audi
 - Audio group failure is reported as success, timed group-gain fades never advance, and several modern audio operations are stubs or incomplete.
 - No compilation or runtime behavior is claimed.
 
+## Post-audit implementation notes
+
+The working branch has since received source-level hardening changes:
+- `xaudio2_audio.cpp`: checked external-file reads and allocation failures; bounded RIFF/WAVE chunk parsing and PCM copies; rejects unsupported/truncated WAV/OGG data; makes failed audio-group loads retryable and only reports successfully parsed groups as loaded.
+- `xdk_file_system.cpp`: checks `SetFilePointer` and `SetEndOfFile` results in binary rewrite.
+- `main.cpp`: validates optional CONFIG.JSN size, allocation, and complete read before parsing.
+- `common.h`: recognizes the Xbox 360/Xenon target as big-endian through the XDK project's `_XBOX` define (also `_M_PPC`).
+
+These are static source changes only. No XDK compilation, console execution, or emulator validation has been performed. Re-audit the latest branch contents before treating the findings as closed.
+
 ## Confirmed issues
 
 ### A-01 — WAV chunk parsing can read beyond the input buffer
@@ -68,17 +78,11 @@ This makes transient storage errors and missing group files look like successful
 
 **Suggested test:** Request a missing group, assert `groupIsLoaded == false`, then create the file and request it again; assert the second request succeeds and embedded audio plays. Also test malformed group data and sparse group indices.
 
-### A-04 — Timed audio-group gain fades never progress
+### A-04 — Timed audio-group gain fades
 
-**Severity: Medium — audio mix behavior incorrect**  
-**Location:** `src/xbox360-xdk/xaudio2_audio.cpp`, `xdkAudioUpdate()` lines 148-188 and `xdkSetGroupGain()` lines 687-694.  
-[Update source](https://github.com/Viniqpp/Butterscotch-360-2/blob/5ac4091448877fc1ce738f69d77b0c64df956925/src/xbox360-xdk/xaudio2_audio.cpp#L148-L188) · [Setter source](https://github.com/Viniqpp/Butterscotch-360-2/blob/5ac4091448877fc1ce738f69d77b0c64df956925/src/xbox360-xdk/xaudio2_audio.cpp#L687-L694)
+**Status: Withdrawn — the finding is not reproducible in the audited source.**
 
-`xdkSetGroupGain()` calls `AudioSystem_setGroupGain()`, which stores the fade target and timer. Unlike the modern miniaudio backend, `xdkAudioUpdate()` never calls `AudioSystem_updateGroupGains()`. Consequently, a nonzero `timeMs` leaves the group's current gain unchanged indefinitely. The setter's immediate reapplication only uses that unchanged current gain.
-
-**Recommended correction:** Advance group gains from `xdkAudioUpdate()`; when a gain changes, reapply the effective group gain to every active voice in that group. Keep the update on the same thread as instance bookkeeping or protect shared state.
-
-**Suggested test:** Fade a group from 1.0 to 0.0 over a known interval; sample effective voice volume during the fade and after completion. Verify immediate (zero-duration) changes still work.
+The inspected XDK implementation already calls `AudioSystem_updateGroupGains(audio, deltaTime)` from `xdkAudioUpdate()` and reapplies the effective group gain when it changes. The original claim that the update call was missing was incorrect. This behavior still needs runtime verification on XDK, but it is not a confirmed source defect.
 
 ### A-05 — SOND pitch is ignored; asset-index pitch/gain accessors do not match upstream semantics
 
