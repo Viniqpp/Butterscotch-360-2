@@ -1321,7 +1321,7 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
     wfx.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 
     IXAudio2* pXA = (IXAudio2*)xa->pXAudio2;
-    HRESULT hr = pXA->CreateSourceVoice(&inst->pVoice, (WAVEFORMATEX*)&wfx);
+    HRESULT hr = pXA->CreateSourceVoice(&inst->pVoice, (WAVEFORMATEX*)&wfx, 0, XAUDIO2_MAX_FREQ_RATIO, NULL, NULL, NULL);
     if (FAILED(hr) || !inst->pVoice) {
         DbgPrint("BS: playEncoded CreateSourceVoice failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
