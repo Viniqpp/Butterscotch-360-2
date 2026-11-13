@@ -1,53 +1,59 @@
-<h1 align="center">🥧 Butterscotch 🥧 (Xbox 360 Port)</h1>
+<h1 align="center">🥧 Butterscotch 360 — Modern Runtime Rework</h1>
 
-## Refresh 2 — modern runner migration (work in progress)
+<p align="center">
+  An unofficial community rework of the original <a href="https://github.com/ceilingtilefan/Butterscotch-360">Butterscotch 360 port</a>, bringing it forward to the modern <a href="https://github.com/ButterscotchRunner/Butterscotch">Butterscotch</a> runtime.
+</p>
 
-The `refresh2/modern-upstream-migration` branch is a development port of the
-Xbox 360 XDK target onto the modern Butterscotch runtime. It is based on
-upstream commit `0c94bfb05e3cb4b8946a38f8085747035dd37f94` and includes the
-modern WAD 17-era parser/core changes.
+## Project goal
 
-Current work includes the modern core source snapshot, an expanded XDK
-filesystem adapter, an XAudio2 adapter for the newer audio interface, and a
-modernized XDK main-loop/runner integration. The D3D9 renderer migration is
-being handled separately because the modern renderer contract has changed
-substantially.
+The goal of this project is to bring a modern version of the Butterscotch GameMaker runner to the **Xbox 360**, with the long-term goal of running:
 
-**This branch is not yet a verified Xbox 360 build.** The renderer adapter still
-needs to satisfy the modern renderer contract, and compilation/runtime testing
-requires a compatible Xbox 360 XDK toolchain. Keep using the legacy `main`
-branch for the older proof-of-concept build until the Refresh 2 port has been
-built and tested.
+- **Undertale** — aiming for full compatibility.
+- **Deltarune** — aiming to support every chapter, where technically possible.
 
-Development branch:
-https://github.com/Viniqpp/Butterscotch-360-2/tree/refresh2/modern-upstream-migration
+This project ports the **runner**, not the games themselves. It aims to run the games through their original GameMaker data files rather than recreating or remaking them.
 
-# note: this xbox 360 port was made entirely with claude code as a proof of concept. there are issues with this port that likely don't exist on the original ps2 port.
+These are compatibility goals, not claims that the games currently work. Full compatibility—especially across every Deltarune chapter—may depend on runtime features, game formats and Xbox 360 hardware limitations that still need to be investigated.
 
-## issues:
+## About this rework
 
-(Undertale):
+This project continues the work of the original community Xbox 360 port by updating its platform code to work with the modern Butterscotch codebase. The intention is to preserve the original port's Xbox-specific work while bringing its runtime, renderer, audio, filesystem and build setup forward.
 
-some audio is sped up
+The main development work happens on the
+[`refresh2/modern-upstream-migration` branch](https://github.com/Viniqpp/Butterscotch-360-2/tree/refresh2/modern-upstream-migration).
+The original `main` branch is being kept separate while the rework is developed.
 
-not optimized for 4:3 properly
+**Status: experimental and incomplete.** The modern core and several platform adapters have been migrated, but the D3D9 renderer still needs its modern interface implementation. The XDK build and actual Xbox 360 runtime have not yet been verified. See the [migration notes](docs/XBOX360_REFRESH2_MIGRATION.md) for technical progress and known blockers.
 
-some slowdowns
+## AI-assisted development
 
-undyne's spears don't point at you
+This rework is being developed by **Vinny with assistance from ChatGPT and Claude**. They are used for tasks such as source-code analysis, migration planning, implementation drafts, debugging and documentation.
 
-(likely more)
+AI-generated suggestions and code are not assumed to be correct just because a tool produced them. They can contain mistakes, misunderstand the project or suggest changes that do not compile. Their output is treated as assistance, and the project is being checked and revised incrementally. Features are not considered tested until they have actually been built and verified.
 
-Deltarune (SURVEY_PROGRAM):
+ChatGPT and Claude are development tools used on this project; their creators do not necessarily endorse or maintain this rework.
 
-Doesn't boot at all
+## A personal note from Vinny
 
-## how to use:
-1. create a new folder for butterscotch and save Butterscotch.xex to it
-2. copy data.win (and .ogg files if you want more audio) to the folder you created earlier
-3. launch Butterscotch.xex (using xexmenu, aurora, freestyle dash, etc)
+<!--
+Vinny: this section is yours to write. Put the reason you're doing this in your own words.
+You could talk about why you wanted to continue the Xbox 360 port, what these games or
+the console mean to you, what you hope to achieve, and how you feel about using AI tools.
+No need to apologize for using them; just be honest about your process and intentions.
+-->
 
-# original readme:
+## Credits and project origins
+
+This rework builds on the work of:
+
+- [Butterscotch](https://github.com/ButterscotchRunner/Butterscotch) — the original open-source GameMaker runner.
+- [Butterscotch 360](https://github.com/ceilingtilefan/Butterscotch-360) by [@ceilingtilefan](https://github.com/ceilingtilefan) — the original community Xbox 360 port.
+
+This repository is an unofficial community project. It is not affiliated with or endorsed by Toby Fox, the creators or publishers of Undertale or Deltarune, GameMaker/YoYo Games, Microsoft, or the upstream Butterscotch maintainers.
+
+The upstream project overview is retained below for background and attribution.
+
+---
 
 <!-- Badges, about the GitHub repository itself -->
 <p align="center">
