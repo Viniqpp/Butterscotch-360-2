@@ -256,13 +256,15 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     if (inAudo) {
         if (sound->audioFile < 0 || (uint32_t)sound->audioFile >= audioData->audo.count) {
             DbgPrint("BS: bad audioFile idx %d (audo count=%d)\n", sound->audioFile, (int)audioData->audo.count);
-            return inst->instanceId;
+            destroyInstance(inst);
+            return -1;
         }
         DataWin_loadAudoIfNeeded(audioData, (uint32_t)sound->audioFile);
         AudioEntry* entry = &audioData->audo.entries[sound->audioFile];
         if (!entry->data || entry->dataSize == 0) {
             DbgPrint("BS: empty audio entry\n");
-            return inst->instanceId;
+            destroyInstance(inst);
+            return -1;
         }
         if (entry->dataSize > 0x7fffffffU) {
             DbgPrint("BS: embedded audio entry is too large\n");
@@ -276,7 +278,8 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         const char* file = sound->file;
         if (!file || !file[0] || !xa->fileSystem) {
             DbgPrint("BS: external sound: no file path or no filesystem\n");
-            return inst->instanceId;
+            destroyInstance(inst);
+            return -1;
         }
         bool hasExt = (strchr(file, '.') != NULL);
         char filename[512];
@@ -284,11 +287,13 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         else snprintf(filename, sizeof(filename), "%s.ogg", file);
 
         char* fullPath = xa->fileSystem->vtable->resolvePath(xa->fileSystem, filename);
-        if (!fullPath) { DbgPrint("BS: could not resolve path for %s\n", filename); return inst->instanceId; }
+        if (!fullPath) { DbgPrint("BS: could not resolve path for %s\n", filename); destroyInstance(inst);
+            return -1; }
         DbgPrint("BS: loading external audio: %s\n", fullPath);
         FILE* f = fopen(fullPath, "rb");
         free(fullPath);
-        if (!f) { DbgPrint("BS: fopen failed for external audio\n"); return inst->instanceId; }
+        if (!f) { DbgPrint("BS: fopen failed for external audio\n"); destroyInstance(inst);
+            return -1; }
         if (fseek(f, 0, SEEK_END) != 0) { fclose(f); destroyInstance(inst); return -1; }
         long fileLength = ftell(f);
         if (fileLength <= 0 || fileLength > 0x7fffffffL || fseek(f, 0, SEEK_SET) != 0) {
@@ -494,7 +499,8 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         return -1;
     }
 
-    return inst->instanceId;
+    destroyInstance(inst);
+            return -1;
 }
 
 static void xdkStopSound(AudioSystem* audio, int32_t soundOrInstance) {
