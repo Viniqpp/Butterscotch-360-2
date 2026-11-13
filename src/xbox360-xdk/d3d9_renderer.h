@@ -19,6 +19,7 @@ typedef struct {
     void* pVertexShader;
     void* pPixelShader;
     void* pVertexDecl;
+    bool initialized; // true only after required D3D resources are ready
 
     // Sprite batch state
     int32_t quadCount;
