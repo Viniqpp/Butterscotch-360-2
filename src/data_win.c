@@ -3092,7 +3092,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
         wholeFileData = (uint8_t *)safeMalloc((size_t) fileSize);
         size_t wholeFileRead = fread(wholeFileData, 1, fileSize, file);
         if (wholeFileRead != fileSize) {
-            logError("Short read while loading %s (expected %zu, got %zu)\\n", filePath, fileSize, wholeFileRead);
+            logError("Short read while loading %s (expected %zu, got %zu)\n", filePath, fileSize, wholeFileRead);
             free(wholeFileData);
             fclose(file);
             DataWin_free(dw);
@@ -3173,7 +3173,7 @@ DataWin* DataWin_parse(const char* filePath, DataWinParserOptions options) {
     }
 
     if (!codeExists && options.parseCode) {
-        logError("CODE chunk does not exist or is empty! This usually means you're loading a YYC game.\\n");
+        logError("CODE chunk does not exist or is empty! This usually means you're loading a YYC game.\n");
         fclose(file);
         if (options.loadType == DATAWINLOADTYPE_LOAD_IN_MEMORY_AHEAD_OF_TIME) free(wholeFileData);
         DataWin_free(dw);
