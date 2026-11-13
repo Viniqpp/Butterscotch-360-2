@@ -424,28 +424,6 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     }
 
     if (freeOggData) free(oggData);
-            return inst->instanceId;
-        }
-    } else {
-        // Try OGG/Vorbis
-        int stbErr = 0;
-        stb_vorbis* vorbis = stb_vorbis_open_memory(oggData, oggSize, &stbErr, NULL);
-        if (!vorbis) {
-            DbgPrint("BS: vorbis open failed: err=%d size=%d\n", stbErr, oggSize);
-            if (freeOggData) free(oggData);
-            return inst->instanceId;
-        }
-        stb_vorbis_info info = stb_vorbis_get_info(vorbis);
-        channels = info.channels;
-        sampleRate = info.sample_rate;
-        int totalSamples = stb_vorbis_stream_length_in_samples(vorbis);
-        pcm = (short*)malloc(totalSamples * channels * sizeof(short));
-        sampleCount = stb_vorbis_get_samples_short_interleaved(vorbis, channels, pcm, totalSamples * channels);
-        stb_vorbis_close(vorbis);
-        DbgPrint("BS: OGG: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
-    }
-
-    if (freeOggData) free(oggData);
 
     if (sampleCount <= 0 || !pcm || sampleRate <= 0 || channels <= 0 || channels > 2) {
         free(pcm);
