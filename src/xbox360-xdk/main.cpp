@@ -487,8 +487,10 @@ VOID __cdecl main() {
             // pass when Runner_drawViews performs its normal clear callback.
             renderer->vtable->clearScreen(renderer,
                 runner->drawBackgroundColor ? runner->backgroundColor : 0, 1.0f);
-            ((D3D9Renderer*)renderer)->skipNextClearScreen = true;
             Runner_drawPre(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
+            // Suppress only Runner_drawViews' own initial clear, after any
+            // intentional clear calls made by Draw Pre have already run.
+            ((D3D9Renderer*)renderer)->skipNextClearScreen = true;
             Runner_drawViews(runner, gameW, gameH, false);
             renderer->vtable->endFrameInit(renderer);
             Runner_drawPost(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
