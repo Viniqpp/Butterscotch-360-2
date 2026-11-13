@@ -72,23 +72,33 @@ static inline void bgrToFloatColor(uint32_t bgr, float alpha, float* outR, float
 // ===[ Batch Flush ]===
 
 static void flushBatch(D3D9Renderer* dr) {
-    if (!dr || !dr->vertexData || !dr->pd3dDevice || dr->quadCount == 0) return;
+    if (!dr || !dr->vertexData || !dr->triangleData || !dr->pd3dDevice || dr->quadCount == 0) return;
 
     IDirect3DDevice9* dev = Dev(dr);
-
-    // Bind texture
-    if (dr->currentTextureIndex >= 0 && (uint32_t)dr->currentTextureIndex < dr->textureCount) {
-        dev->SetTexture(0, (IDirect3DBaseTexture9*)dr->textures[dr->currentTextureIndex]);
-    } else {
-        dev->SetTexture(0, (IDirect3DBaseTexture9*)dr->whiteTexture);
+    IDirect3DBaseTexture9* texture = dr->whiteTexture
+        ? (IDirect3DBaseTexture9*)dr->whiteTexture : NULL;
+    if (dr->currentTextureIndex >= 0 &&
+        (uint32_t)dr->currentTextureIndex < dr->textureCount &&
+        dr->textures[dr->currentTextureIndex]) {
+        texture = (IDirect3DBaseTexture9*)dr->textures[dr->currentTextureIndex];
     }
 
-    // Draw using DrawPrimitiveUP — simpler than managing a vertex buffer for 2D
-    int32_t vertCount = dr->quadCount * D3D9_VERTS_PER_QUAD;
-    // We use QUADLIST (Xbox 360 extension) — 4 verts per quad, no index buffer needed
-    dev->DrawPrimitiveUP(D3DPT_QUADLIST, dr->quadCount,
-                         dr->vertexData, sizeof(SpriteVertex));
-
+    HRESULT hr = dev->SetTexture(0, texture);
+    if (SUCCEEDED(hr)) {
+        // Use the standard D3D triangle-list topology rather than relying on
+        // the non-portable QUADLIST primitive type.
+        SpriteVertex* source = (SpriteVertex*)dr->vertexData;
+        SpriteVertex* triangles = (SpriteVertex*)dr->triangleData;
+        for (int32_t i = 0; i < dr->quadCount; ++i) {
+            SpriteVertex* q = source + i * D3D9_VERTS_PER_QUAD;
+            SpriteVertex* t = triangles + i * 6;
+            t[0] = q[0]; t[1] = q[1]; t[2] = q[2];
+            t[3] = q[0]; t[4] = q[2]; t[5] = q[3];
+        }
+        hr = dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, dr->quadCount * 2,
+                                  triangles, sizeof(SpriteVertex));
+    }
+    if (FAILED(hr)) DbgPrint("BS: D3D9 quad batch flush failed: hr=0x%08X\n", (unsigned)hr);
     dr->quadCount = 0;
 }
 
@@ -140,6 +150,11 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     dr->vertexData = (uint8_t*)malloc(D3D9_MAX_QUADS * D3D9_VERTS_PER_QUAD * sizeof(SpriteVertex));
     if (!dr->vertexData) {
         OutputDebugStringA("D3D9: vertex staging allocation failed\n");
+        return;
+    }
+    dr->triangleData = malloc(D3D9_MAX_QUADS * 6u * sizeof(SpriteVertex));
+    if (!dr->triangleData) {
+        OutputDebugStringA("D3D9: triangle staging allocation failed\n");
         return;
     }
     dr->primitiveVertexCapacity = D3D9_MAX_PRIMITIVE_VERTICES;
@@ -344,6 +359,7 @@ static void d3d9Destroy(Renderer* renderer) {
     free(dr->textureWidths);
     free(dr->textureHeights);
     free(dr->vertexData);
+    free(dr->triangleData);
     free(dr->primitiveVertexData);
     if (dr->whiteTexture) ((IDirect3DTexture9*)dr->whiteTexture)->Release();
     if (dr->pVertexShader) ((IDirect3DVertexShader9*)dr->pVertexShader)->Release();
