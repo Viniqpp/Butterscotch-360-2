@@ -1031,22 +1031,169 @@ static void xdkResume(AudioSystem* audio) {
     xdkResumeAll(audio);
 }
 
+static bool xdkReadExternalAudioForLength(XdkAudioSystem* xa, const char* file,
+                                           uint8_t** outData, uint32_t* outBytes) {
+    if (!xa || !xa->fileSystem || !file || !file[0] || !outData || !outBytes) return false;
+    *outData = NULL;
+    *outBytes = 0;
+
+    const char* fileName = file;
+    const char* slash = strrchr(file, '/');
+    const char* backslash = strrchr(file, '\\');
+    if (slash && slash + 1 > fileName) fileName = slash + 1;
+    if (backslash && backslash + 1 > fileName) fileName = backslash + 1;
+    bool hasExt = strchr(fileName, '.') != NULL;
+    size_t fileLen = strlen(file);
+    size_t extensionLen = hasExt ? 0 : 4;
+    if (fileLen + extensionLen >= 512) return false;
+
+    char filename[512];
+    memcpy(filename, file, fileLen);
+    if (!hasExt) memcpy(filename + fileLen, ".ogg", 5);
+    else filename[fileLen] = '\0';
+
+    FileSystem* fs = xa->fileSystem;
+    void* handle = fs->vtable->binaryOpen(fs, filename, GML_FILE_BIN_READ);
+    if (!handle) return false;
+
+    int32_t size = fs->vtable->binarySize(fs, handle);
+    if (size <= 0 || (uint32_t)size > XDK_MAX_ENCODED_AUDIO_BYTES) {
+        fs->vtable->binaryClose(fs, handle);
+        return false;
+    }
+    uint8_t* data = (uint8_t*)malloc((size_t)size);
+    if (!data) {
+        fs->vtable->binaryClose(fs, handle);
+        return false;
+    }
+
+    int32_t totalRead = 0;
+    while (totalRead < size) {
+        int32_t remaining = size - totalRead;
+        int32_t got = fs->vtable->binaryRead(fs, handle, data + totalRead, remaining);
+        if (got <= 0 || got > remaining) break;
+        totalRead += got;
+    }
+    fs->vtable->binaryClose(fs, handle);
+    if (totalRead != size) {
+        free(data);
+        return false;
+    }
+    *outData = data;
+    *outBytes = (uint32_t)size;
+    return true;
+}
+
+static float xdkMeasureAudioBytes(const uint8_t* data, uint32_t bytes) {
+    if (!data || bytes == 0 || bytes > XDK_MAX_ENCODED_AUDIO_BYTES) return 0.0f;
+
+    if (bytes >= 12 && memcmp(data, "RIFF", 4) == 0) {
+        uint32_t riffBytes = xdkReadLE32(data + 4);
+        if (memcmp(data + 8, "WAVE", 4) != 0 || riffBytes < 4 ||
+            riffBytes > bytes - 8) return 0.0f;
+
+        size_t offset = 12;
+        size_t riffEnd = (size_t)riffBytes + 8;
+        uint16_t formatTag = 0, channels = 0, blockAlign = 0, bitsPerSample = 0;
+        uint32_t sampleRate = 0, dataSize = 0;
+        bool haveFmt = false, haveData = false;
+        while (offset <= riffEnd && riffEnd - offset >= 8) {
+            const uint8_t* chunk = data + offset;
+            uint32_t chunkBytes = xdkReadLE32(chunk + 4);
+            size_t payload = offset + 8;
+            if ((size_t)chunkBytes > riffEnd - payload) return 0.0f;
+
+            if (memcmp(chunk, "fmt ", 4) == 0) {
+                if (haveFmt || chunkBytes < 16) return 0.0f;
+                formatTag = xdkReadLE16(data + payload);
+                channels = xdkReadLE16(data + payload + 2);
+                sampleRate = xdkReadLE32(data + payload + 4);
+                blockAlign = xdkReadLE16(data + payload + 12);
+                bitsPerSample = xdkReadLE16(data + payload + 14);
+                haveFmt = true;
+            } else if (memcmp(chunk, "data", 4) == 0) {
+                if (haveData) return 0.0f;
+                dataSize = chunkBytes;
+                haveData = true;
+            }
+
+            size_t padded = (size_t)chunkBytes + (chunkBytes & 1U);
+            if (padded > riffEnd - payload) return 0.0f;
+            offset = payload + padded;
+        }
+        if (offset != riffEnd || !haveFmt || !haveData || formatTag != 1 ||
+            bitsPerSample != 16 || channels == 0 || channels > 2 ||
+            sampleRate == 0 || blockAlign != channels * 2 ||
+            dataSize == 0 || dataSize % blockAlign != 0) return 0.0f;
+        return (float)(dataSize / blockAlign) / (float)sampleRate;
+    }
+
+    int error = 0;
+    stb_vorbis* vorbis = stb_vorbis_open_memory(data, (int)bytes, &error, NULL);
+    if (!vorbis) return 0.0f;
+    stb_vorbis_info info = stb_vorbis_get_info(vorbis);
+    unsigned int frames = stb_vorbis_stream_length_in_samples(vorbis);
+    float duration = info.sample_rate > 0 && frames > 0
+        ? (float)frames / (float)info.sample_rate : 0.0f;
+    stb_vorbis_close(vorbis);
+    return duration;
+}
+
 static float xdkGetSoundLength(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkSoundInstance* inst = soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE
         ? findById(xa, soundOrInstance) : NULL;
-    if (!inst && soundOrInstance >= 0 && audio->dw &&
-        (uint32_t)soundOrInstance < audio->dw->sond.count) {
-        XdkInstanceArray* arr = Instances(xa);
-        for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-            if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance) {
-                inst = &arr->instances[i];
-                break;
-            }
+    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE)
+        return inst && inst->sampleRate > 0 && inst->channels > 0
+            ? (float)inst->pcmSize / ((float)inst->sampleRate * (float)inst->channels * 2.0f)
+            : 0.0f;
+
+    if (soundOrInstance < 0 || !audio->dw ||
+        (uint32_t)soundOrInstance >= audio->dw->sond.count) return 0.0f;
+
+    XdkInstanceArray* arr = Instances(xa);
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance) {
+            inst = &arr->instances[i];
+            if (inst->sampleRate > 0 && inst->channels > 0)
+                return (float)inst->pcmSize / ((float)inst->sampleRate * (float)inst->channels * 2.0f);
         }
     }
-    if (!inst || inst->sampleRate == 0 || inst->channels == 0) return 0.0f;
-    return (float)inst->pcmSize / ((float)inst->sampleRate * (float)inst->channels * 2.0f);
+
+    // Match the modern API: a valid SOND length query works before playback.
+    Sound* sound = &audio->dw->sond.sounds[soundOrInstance];
+    int32_t groupIndex = sound->audioGroup < 0 ? 0 : sound->audioGroup;
+    if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex))
+        xdkGroupLoad(audio, groupIndex);
+    if (groupIndex < 0 || (uint32_t)groupIndex >= arrlen(audio->audioGroups) ||
+        !audio->audioGroups[groupIndex]) return 0.0f;
+    DataWin* audioData = audio->audioGroups[groupIndex];
+
+    bool isRegular = (sound->flags & AUDIO_ENTRY_FLAG_REGULAR) == AUDIO_ENTRY_FLAG_REGULAR;
+    bool isEmbedded = (sound->flags & AUDIO_ENTRY_FLAG_IS_EMBEDDED) != 0;
+    bool isCompressed = (sound->flags & AUDIO_ENTRY_FLAG_IS_COMPRESSED) != 0;
+    bool inAudo = !isRegular || isEmbedded || isCompressed;
+
+    const uint8_t* encoded = NULL;
+    uint8_t* owned = NULL;
+    uint32_t encodedBytes = 0;
+    if (inAudo) {
+        if (sound->audioFile < 0 || (uint32_t)sound->audioFile >= audioData->audo.count) return 0.0f;
+        DataWin_loadAudoIfNeeded(audioData, (uint32_t)sound->audioFile);
+        AudioEntry* entry = &audioData->audo.entries[sound->audioFile];
+        if (!entry->data || entry->dataSize == 0 ||
+            entry->dataSize > XDK_MAX_ENCODED_AUDIO_BYTES) return 0.0f;
+        encoded = entry->data;
+        encodedBytes = entry->dataSize;
+    } else {
+        if (!xdkReadExternalAudioForLength(xa, sound->file, &owned, &encodedBytes))
+            return 0.0f;
+        encoded = owned;
+    }
+
+    float duration = xdkMeasureAudioBytes(encoded, encodedBytes);
+    free(owned);
+    return duration;
 }
 
 static void xdkSetMasterGainForListener(AudioSystem* audio, float gain, int32_t listenerId) {
