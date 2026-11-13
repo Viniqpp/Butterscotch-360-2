@@ -812,10 +812,14 @@ static void xdkSetTrackPosition(AudioSystem* audio, int32_t soundOrInstance, flo
     hr = inst->pVoice->SubmitSourceBuffer(&buffer);
     if (FAILED(hr)) {
         DbgPrint("BS: seek SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
         return;
     }
     hr = inst->pVoice->Start(0);
-    if (FAILED(hr)) DbgPrint("BS: seek Start failed: hr=0x%08X\n", (unsigned)hr);
+    if (FAILED(hr)) {
+        DbgPrint("BS: seek Start failed: hr=0x%08X\n", (unsigned)hr);
+        destroyInstance(inst);
+    }
 }
 
 static void xdkSetMasterGain(AudioSystem* audio, float gain) {
