@@ -160,6 +160,10 @@ static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileS
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     xa->base.dw = dataWin;
     arrput(xa->base.audioGroups, dataWin);
+    if (arrlen(xa->base.audioGroups) != 1 || xa->base.audioGroups[0] != dataWin) {
+        DbgPrint("BS: could not allocate main audio-group table\n");
+        return;
+    }
     xa->fileSystem = fileSystem;
     xa->masterGain = 1.0f;
     xa->activePcmBytes = 0;
@@ -246,9 +250,10 @@ static void xdkAudioUpdate(AudioSystem* audio, float deltaTime) {
             }
         }
 
-        // Clean up instances with no voice (failed to create/decode)
+        // Clean up failed/incomplete instances through the same owner-aware
+        // path used everywhere else, so PCM memory accounting cannot leak.
         if (!inst->pVoice) {
-            inst->active = false;
+            destroyInstance(inst);
             continue;
         }
 
@@ -989,6 +994,10 @@ static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
     while (arrlen(audio->audioGroups) <= groupIndex) {
         DataWin* empty = NULL;
         arrput(audio->audioGroups, empty);
+        if (arrlen(audio->audioGroups) <= groupIndex) {
+            DbgPrint("BS: could not grow audio-group table for index %d\n", groupIndex);
+            return;
+        }
     }
     if (audio->audioGroups[groupIndex] != NULL) return;
 
