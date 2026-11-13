@@ -298,7 +298,46 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     if (!xa->initialized) { DbgPrint("BS: audio not initialized\n"); return -1; }
 
     DataWin* dw = xa->base.dw;
-    if (soundIndex < 0 || (uint32_t)soundIndex >= dw->sond.count) return -1;
+    bool isStream = soundIndex >= XDK_AUDIO_STREAM_INDEX_BASE;
+    Sound* sound = NULL;
+    const char* externalFile = NULL;
+    float initialGain = 1.0f;
+    float initialPitch = 1.0f;
+    DataWin* audioData = dw;
+    bool inAudo = false;
+
+    if (isStream) {
+        int32_t streamSlot = soundIndex - XDK_AUDIO_STREAM_INDEX_BASE;
+        if (streamSlot < 0 || streamSlot >= XDK_MAX_AUDIO_STREAMS ||
+            !xa->streams[streamSlot].active || !xa->streams[streamSlot].filePath) {
+            DbgPrint("BS: invalid audio stream index %d\n", soundIndex);
+            return -1;
+        }
+        externalFile = xa->streams[streamSlot].filePath;
+        initialGain = xa->streams[streamSlot].initialGain;
+        initialPitch = xa->streams[streamSlot].initialPitch;
+    } else {
+        if (soundIndex < 0 || !dw || (uint32_t)soundIndex >= dw->sond.count) return -1;
+        sound = &dw->sond.sounds[soundIndex];
+        if (sound->volume >= 0.0f) initialGain = sound->volume;
+        if (sound->pitch > 0.0f && sound->pitch <= FLT_MAX) initialPitch = sound->pitch;
+
+        int32_t groupIndex = sound->audioGroup < 0 ? 0 : sound->audioGroup;
+        if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex))
+            xdkGroupLoad(audio, groupIndex);
+        if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex)) {
+            DbgPrint("BS: audio group %d is not loaded; refusing sound %d\n", groupIndex, soundIndex);
+            return -1;
+        }
+        if (groupIndex < 0 || (uint32_t)groupIndex >= arrlen(audio->audioGroups) ||
+            !audio->audioGroups[groupIndex]) return -1;
+        audioData = audio->audioGroups[groupIndex];
+
+        bool isRegular = (sound->flags & AUDIO_ENTRY_FLAG_REGULAR) == AUDIO_ENTRY_FLAG_REGULAR;
+        bool isEmbedded = (sound->flags & AUDIO_ENTRY_FLAG_IS_EMBEDDED) != 0;
+        bool isCompressed = (sound->flags & AUDIO_ENTRY_FLAG_IS_COMPRESSED) != 0;
+        inAudo = !isRegular || isEmbedded || isCompressed;
+    }
 
     XdkSoundInstance* inst = findFreeSlot(xa);
     if (!inst) return -1;
@@ -308,11 +347,11 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     inst->soundIndex = soundIndex;
     inst->priority = priority;
     inst->loop = loop;
-    inst->pitch = 1.0f;
-    inst->sondPitch = 1.0f;
+    inst->pitch = initialPitch;
+    inst->sondPitch = initialPitch;
     inst->currentGain = 1.0f;
     inst->targetGain = 1.0f;
-    inst->sondVolume = 1.0f;
+    inst->sondVolume = initialGain;
 
     inst->instanceId = allocateInstanceId(xa);
     if (inst->instanceId < 0) {
@@ -320,29 +359,10 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         return -1;
     }
 
-    Sound* sound = &dw->sond.sounds[soundIndex];
-    DbgPrint("BS: playSound idx=%d name=%s flags=0x%x audioFile=%d\n",
-        soundIndex, sound->name ? sound->name : "?", (unsigned)sound->flags, sound->audioFile);
-    if (sound->volume >= 0) inst->sondVolume = sound->volume;
-    // SOND pitch is the initial playback pitch; later instance/sound-index
-    // pitch changes replace this effective value, matching the upstream API.
-    if (sound->pitch > 0.0f && sound->pitch <= FLT_MAX) inst->pitch = sound->pitch;
-
-    int32_t groupIndex = sound->audioGroup < 0 ? 0 : sound->audioGroup;
-    if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex))
-        xdkGroupLoad(audio, groupIndex);
-    if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex)) {
-        DbgPrint("BS: audio group %d is not loaded; refusing sound %d\n", groupIndex, soundIndex);
-        destroyInstance(inst);
-        return -1;
+    if (sound) {
+        DbgPrint("BS: playSound idx=%d name=%s flags=0x%x audioFile=%d\n",
+            soundIndex, sound->name ? sound->name : "?", (unsigned)sound->flags, sound->audioFile);
     }
-    DataWin* audioData = groupIndex == 0 ? dw : audio->audioGroups[groupIndex];
-
-    // Modern WAD flags distinguish regular external audio from AUDO data.
-    bool isRegular = (sound->flags & AUDIO_ENTRY_FLAG_REGULAR) == AUDIO_ENTRY_FLAG_REGULAR;
-    bool isEmbedded = (sound->flags & AUDIO_ENTRY_FLAG_IS_EMBEDDED) != 0;
-    bool isCompressed = (sound->flags & AUDIO_ENTRY_FLAG_IS_COMPRESSED) != 0;
-    bool inAudo = !isRegular || isEmbedded || isCompressed;
 
     uint8_t* oggData = NULL;
     int oggSize = 0;
@@ -370,7 +390,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         oggSize = (int)entry->dataSize;
     } else {
         // External: load .ogg file via FileSystem
-        const char* file = sound->file;
+        const char* file = isStream ? externalFile : sound->file;
         if (!file || !file[0] || !xa->fileSystem) {
             DbgPrint("BS: external sound: no file path or no filesystem\n");
             destroyInstance(inst);
@@ -652,8 +672,8 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         destroyInstance(inst);
         return -1;
     }
-    hr = inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain *
-                                  AudioSystem_soundGroupGain(audio, soundIndex));
+    float groupGain = !isStream ? AudioSystem_soundGroupGain(audio, soundIndex) : 1.0f;
+    hr = inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain * groupGain);
     if (FAILED(hr)) {
         DbgPrint("BS: SetVolume failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
