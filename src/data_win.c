@@ -3623,10 +3623,18 @@ void DataWin_free(DataWin* dw) {
 
     // AUDO
     if (dw->audo.entries) {
-        if (!dw->mappedFile) {
-            repeat(dw->audo.count, i) {
-                free(dw->audo.entries[i].data);
+        repeat(dw->audo.count, i) {
+            uint8_t* data = dw->audo.entries[i].data;
+            bool pointsIntoMapping = false;
+            if (data && dw->mappedFile) {
+                uintptr_t mapStart = (uintptr_t)dw->mappedFile;
+                uintptr_t mapEnd = mapStart + dw->fileSize;
+                uintptr_t dataAddress = (uintptr_t)data;
+                pointsIntoMapping = dataAddress >= mapStart && dataAddress < mapEnd;
             }
+            // Eager mapped entries point into the mapping; lazy-loaded entries
+            // own a separate allocation and must still be freed.
+            if (data && !pointsIntoMapping) free(data);
         }
         free(dw->audo.entries);
     }
