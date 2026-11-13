@@ -1,5 +1,27 @@
 <h1 align="center">🥧 Butterscotch 🥧 (Xbox 360 Port)</h1>
 
+## Refresh 2 — modern runner migration (work in progress)
+
+The `refresh2/modern-upstream-migration` branch is a development port of the
+Xbox 360 XDK target onto the modern Butterscotch runtime. It is based on
+upstream commit `0c94bfb05e3cb4b8946a38f8085747035dd37f94` and includes the
+modern WAD 17-era parser/core changes.
+
+Current work includes the modern core source snapshot, an expanded XDK
+filesystem adapter, an XAudio2 adapter for the newer audio interface, and a
+modernized XDK main-loop/runner integration. The D3D9 renderer migration is
+being handled separately because the modern renderer contract has changed
+substantially.
+
+**This branch is not yet a verified Xbox 360 build.** The renderer adapter still
+needs to satisfy the modern renderer contract, and compilation/runtime testing
+requires a compatible Xbox 360 XDK toolchain. Keep using the legacy `main`
+branch for the older proof-of-concept build until the Refresh 2 port has been
+built and tested.
+
+Development branch:
+https://github.com/Viniqpp/Butterscotch-360-2/tree/refresh2/modern-upstream-migration
+
 # note: this xbox 360 port was made entirely with claude code as a proof of concept. there are issues with this port that likely don't exist on the original ps2 port.
 
 ## issues:
