@@ -12,6 +12,8 @@ typedef struct {
     void* pMasterVoice;     // IXAudio2MasteringVoice*
     float masterGain;
     bool initialized;
+    uint32_t activePcmBytes;
+    uint32_t maxPcmBytes;
 
     FileSystem* fileSystem; // for loading external audio files
 
