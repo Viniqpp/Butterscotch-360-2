@@ -74,12 +74,14 @@ every upstream desktop/mobile backend or test asset.
 
 ### 2. Reconcile platform/build configuration
 
-**Initial XDK project reconciliation committed.** `Butterscotch360.vcxproj`
-now includes the modern root core, default font, image decoder, FMOD
-compatibility sources, disabled-physics implementation, null-video backend and
-required vendored libraries. Desktop/GL loop code is excluded from this XDK
-project. The legacy root `CMakeLists.txt` and its desktop CI workflow still need
-separate reconciliation; they are not evidence of an XDK build.
+**Build-system migration committed.** The modern upstream `CMakeLists.txt`,
+CLI entry point, core loop and no-op backend are imported. A GitHub Actions
+headless/no-op smoke workflow is configured to compile the modern core on Linux.
+The XDK `Butterscotch360.vcxproj` includes the modern root core, default font,
+image decoder, FMOD compatibility sources, disabled-physics implementation,
+null-video backend and required vendored libraries; desktop/GL loop code is
+excluded from the XDK project. GitHub has not reported a smoke-workflow run yet,
+and this workflow does not validate the XDK target.
 
 ### 3. Port the filesystem first
 
@@ -129,15 +131,16 @@ built and tested.
 - [x] Import the selected modern core/source/dependency snapshot.
 - [x] Implement the expanded XDK filesystem vtable.
 - [x] Adapt XAudio2 to the modern audio vtable (with documented unsupported features).
+- [x] Import modern CMake/CLI sources and configure a headless core smoke workflow.
 - [x] Reconcile the XDK project source lists and modern runner startup/frame lifecycle.
+- [ ] Confirm the headless GitHub Actions smoke build passes.
 - [ ] Complete modern D3D9 renderer vtable implementation (separate audit in progress).
-- [ ] Reconcile/retire the legacy desktop CMake + CI configuration.
 - [ ] Compile the XDK project with the compatible Xbox 360 toolchain.
 - [ ] Run Undertale and WAD 17-era Deltarune test cases on hardware/emulator.
 
 ## Important build caveat
 
-No Xbox 360 XDK compiler is available in this work session, so none of the
-changes above should be described as compiling or running successfully yet.
-The modern renderer contract still blocks `Runner_create` until D3D9 satisfies
-the required vtable entries.
+No Xbox 360 XDK compiler is available in this work session, so the XDK changes
+have not been compiled or run. The CI workflow is configured but no run result
+has been observed. The modern renderer contract still blocks `Runner_create`
+until D3D9 satisfies the required vtable entries.
