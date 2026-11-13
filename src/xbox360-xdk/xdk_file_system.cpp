@@ -14,7 +14,7 @@ static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     // Absolute drive paths are passed through; ordinary game paths are rooted
     // beside data.win. The XDK accepts game:\\ and d:\\ style paths.
     bool absolute = (strchr(relativePath, ':') != NULL) ||
-                    (relativePath[0] == '\\\\') ||
+                    (relativePath[0] == '\\') ||
                     (relativePath[0] == '/');
     size_t baseLen = absolute ? 0 : strlen(xfs->basePath);
     size_t relLen = strlen(relativePath);
@@ -25,7 +25,7 @@ static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     memcpy(result + baseLen, relativePath, relLen + 1);
 
     for (char* p = result + baseLen; *p; ++p) {
-        if (*p == '/') *p = '\\\\';
+        if (*p == '/') *p = '\\';
     }
     return result;
 }
@@ -96,7 +96,7 @@ static char* xdkReadFileText(FileSystem* fs, const char* relativePath) {
         free(buffer);
         return NULL;
     }
-    buffer[size] = '\\0';
+    buffer[size] = '\0';
     return buffer;
 }
 
@@ -300,9 +300,9 @@ static FileSystemDirEntry* xdkListDirectory(FileSystem* fs, const char* relative
         return NULL;
     }
     memcpy(pattern, directory, length);
-    if (length && directory[length - 1] != '\\\\') pattern[length++] = '\\\\';
+    if (length && directory[length - 1] != '\\') pattern[length++] = '\\';
     pattern[length++] = '*';
-    pattern[length] = '\\0';
+    pattern[length] = '\0';
 
     WIN32_FIND_DATAA found;
     HANDLE search = FindFirstFileA(pattern, &found);
@@ -359,15 +359,15 @@ XdkFileSystem* XdkFileSystem_create(const char* dataWinPath) {
 
     xfs->base.vtable = &xdkFileSystemVtable;
 
-    const char* lastSlash = dataWinPath ? strrchr(dataWinPath, '\\\\') : NULL;
+    const char* lastSlash = dataWinPath ? strrchr(dataWinPath, '\\') : NULL;
     if (!lastSlash && dataWinPath) lastSlash = strrchr(dataWinPath, '/');
     if (lastSlash) {
         size_t dirLen = (size_t)(lastSlash - dataWinPath + 1);
         if (dirLen >= sizeof(xfs->basePath)) dirLen = sizeof(xfs->basePath) - 1;
         memcpy(xfs->basePath, dataWinPath, dirLen);
-        xfs->basePath[dirLen] = '\\0';
+        xfs->basePath[dirLen] = '\0';
     } else {
-        strcpy(xfs->basePath, "game:\\\\");
+        strcpy(xfs->basePath, "game:\\");
     }
     return xfs;
 }
