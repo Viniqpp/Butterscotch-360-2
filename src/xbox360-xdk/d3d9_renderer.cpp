@@ -410,6 +410,11 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
 
     dr->skipNextClearScreen = false;
     dr->sceneActive = false;
+    dr->quadCount = 0;
+    dr->currentTextureIndex = -1;
+    dr->primitiveActive = false;
+    dr->primitiveVertexCount = 0;
+    dr->primitiveTexture = 0;
     HRESULT sceneHr = dev->BeginScene();
     if (FAILED(sceneHr)) {
         DbgPrint("BS: D3D9 BeginScene failed: hr=0x%08X\n", (unsigned)sceneHr);
