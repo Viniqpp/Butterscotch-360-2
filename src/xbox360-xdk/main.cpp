@@ -189,14 +189,28 @@ VOID __cdecl main() {
                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hConfig != INVALID_HANDLE_VALUE) {
         DWORD configSize = GetFileSize(hConfig, NULL);
-        char* configText = (char*)malloc(configSize + 1);
-        DWORD bytesRead;
-        ReadFile(hConfig, configText, configSize, &bytesRead, NULL);
+        // CONFIG.JSN is optional and small. Reject invalid/oversized files
+        // rather than allocating from an unchecked DWORD or parsing a partial read.
+        if (configSize != INVALID_FILE_SIZE && configSize <= 1024U * 1024U) {
+            char* configText = (char*)malloc((size_t)configSize + 1);
+            if (configText) {
+                DWORD bytesRead = 0;
+                BOOL readOk = ReadFile(hConfig, configText, configSize, &bytesRead, NULL);
+                if (readOk && bytesRead == configSize) {
+                    configText[bytesRead] = '\0';
+                    configRoot = JsonReader_parse(configText);
+                    if (configRoot) OutputDebugStringA("Loaded CONFIG.JSN\n");
+                } else {
+                    OutputDebugStringA("Ignoring unreadable CONFIG.JSN\n");
+                }
+                free(configText);
+            } else {
+                OutputDebugStringA("Ignoring CONFIG.JSN: out of memory\n");
+            }
+        } else {
+            OutputDebugStringA("Ignoring invalid or oversized CONFIG.JSN\n");
+        }
         CloseHandle(hConfig);
-        configText[bytesRead] = '\0';
-        configRoot = JsonReader_parse(configText);
-        free(configText);
-        OutputDebugStringA("Loaded CONFIG.JSN\n");
     }
 
     // ===[ Create Subsystems ]===
