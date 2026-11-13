@@ -149,6 +149,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     hr = dev->CreateVertexShader((const DWORD*)pCode->GetBufferPointer(),
                                  (IDirect3DVertexShader9**)&dr->pVertexShader);
     pCode->Release();
+    if (pErr) { pErr->Release(); pErr = NULL; }
     if (FAILED(hr) || !dr->pVertexShader) {
         OutputDebugStringA("D3D9: CreateVertexShader failed\n");
         return;
@@ -165,6 +166,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     hr = dev->CreatePixelShader((const DWORD*)pCode->GetBufferPointer(),
                                 (IDirect3DPixelShader9**)&dr->pPixelShader);
     pCode->Release();
+    if (pErr) { pErr->Release(); pErr = NULL; }
     if (FAILED(hr) || !dr->pPixelShader) {
         OutputDebugStringA("D3D9: CreatePixelShader failed\n");
         return;
@@ -220,10 +222,19 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 
     for (uint32_t i = 0; i < dr->textureCount; i++) {
         Texture* txtr = &dataWin->txtr.textures[i];
-        int w, h, channels;
+        if (!txtr->blobData || txtr->blobSize == 0 || txtr->blobSize > 0x7fffffffU) {
+            DbgPrint("BS: invalid TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
+            continue;
+        }
+        int w = 0, h = 0, channels = 0;
         uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int)txtr->blobSize, &w, &h, &channels, 4);
         if (!pixels) {
             OutputDebugStringA("Failed to decode TXTR page\n");
+            continue;
+        }
+        if (w <= 0 || h <= 0 || w > 0x1fffffff) {
+            DbgPrint("BS: invalid TXTR dimensions for page %u (%d x %d)\n", i, w, h);
+            stbi_image_free(pixels);
             continue;
         }
 
