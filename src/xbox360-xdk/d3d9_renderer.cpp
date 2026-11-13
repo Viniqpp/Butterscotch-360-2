@@ -525,6 +525,94 @@ static void d3d9DrawSpritePart(Renderer* renderer, int32_t tpagIndex,
     setVertex(&v[3], x0, y1, u0, v1, cr, cg, cb, ca);
 }
 
+// Exact modern drawSpritePart contract. The pivot is in game coordinates;
+// the source rectangle remains floating-point through UV calculation.
+static void d3d9DrawSpritePartModern(Renderer* renderer, int32_t tpagIndex,
+                                     float srcOffX, float srcOffY, float srcW, float srcH,
+                                     float x, float y, float xscale, float yscale,
+                                     float angleDeg, float pivotX, float pivotY,
+                                     uint32_t color, float alpha) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    DataWin* dw = renderer->dataWin;
+    if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return;
+    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+    int32_t page = tpag->texturePageId;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) return;
+    if (srcW <= 0.0f || srcH <= 0.0f) return;
+
+    ensureTexture(dr, page);
+    float texW = (float)dr->textureWidths[page], texH = (float)dr->textureHeights[page];
+    if (texW <= 0.0f || texH <= 0.0f) return;
+    float u0 = (tpag->sourceX + srcOffX) / texW;
+    float v0 = (tpag->sourceY + srcOffY) / texH;
+    float u1 = (tpag->sourceX + srcOffX + srcW) / texW;
+    float v1 = (tpag->sourceY + srcOffY + srcH) / texH;
+
+    float px[4] = { x, x + srcW * xscale, x + srcW * xscale, x };
+    float py[4] = { y, y, y + srcH * yscale, y + srcH * yscale };
+    float rad = angleDeg * (3.14159265f / 180.0f);
+    float cs = cosf(rad), sn = sinf(rad);
+    SpriteVertex* v = allocQuad(dr);
+    float cr, cg, cb, ca;
+    bgrToFloatColor(color, alpha, &cr, &cg, &cb, &ca);
+    float uvx[4] = { u0, u1, u1, u0 };
+    float uvy[4] = { v0, v0, v1, v1 };
+    for (int i = 0; i < 4; i++) {
+        float dx = px[i] - pivotX, dy = py[i] - pivotY;
+        float rx = pivotX + dx * cs - dy * sn;
+        float ry = pivotY + dx * sn + dy * cs;
+        float sx, sy;
+        transformPoint(dr, rx, ry, &sx, &sy);
+        setVertex(&v[i], sx, sy, uvx[i], uvy[i], cr, cg, cb, ca);
+    }
+}
+
+static void d3d9DrawSpritePartColorModern(Renderer* renderer, int32_t tpagIndex,
+                                          float srcOffX, float srcOffY, float srcW, float srcH,
+                                          float x, float y, float xscale, float yscale,
+                                          float angleDeg, float pivotX, float pivotY,
+                                          uint32_t c1, uint32_t c2, uint32_t c3, uint32_t c4,
+                                          float alpha) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    DataWin* dw = renderer->dataWin;
+    if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return;
+    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+    int32_t page = tpag->texturePageId;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page] ||
+        srcW <= 0.0f || srcH <= 0.0f) return;
+
+    ensureTexture(dr, page);
+    float texW = (float)dr->textureWidths[page], texH = (float)dr->textureHeights[page];
+    if (texW <= 0.0f || texH <= 0.0f) return;
+    float u[4] = {
+        (tpag->sourceX + srcOffX) / texW,
+        (tpag->sourceX + srcOffX + srcW) / texW,
+        (tpag->sourceX + srcOffX + srcW) / texW,
+        (tpag->sourceX + srcOffX) / texW
+    };
+    float vv[4] = {
+        (tpag->sourceY + srcOffY) / texH,
+        (tpag->sourceY + srcOffY) / texH,
+        (tpag->sourceY + srcOffY + srcH) / texH,
+        (tpag->sourceY + srcOffY + srcH) / texH
+    };
+    float px[4] = { x, x + srcW * xscale, x + srcW * xscale, x };
+    float py[4] = { y, y, y + srcH * yscale, y + srcH * yscale };
+    uint32_t colors[4] = { c1, c2, c3, c4 };
+    float rad = angleDeg * (3.14159265f / 180.0f);
+    float cs = cosf(rad), sn = sinf(rad);
+    SpriteVertex* v = allocQuad(dr);
+    for (int i = 0; i < 4; i++) {
+        float dx = px[i] - pivotX, dy = py[i] - pivotY;
+        float sx, sy;
+        transformPoint(dr, pivotX + dx * cs - dy * sn,
+                       pivotY + dx * sn + dy * cs, &sx, &sy);
+        float cr, cg, cb, ca;
+        bgrToFloatColor(colors[i], alpha, &cr, &cg, &cb, &ca);
+        setVertex(&v[i], sx, sy, u[i], vv[i], cr, cg, cb, ca);
+    }
+}
+
 static void d3d9DrawRectangle(Renderer* renderer, float x1, float y1, float x2, float y2,
                                uint32_t color, float alpha, bool outline) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
@@ -1084,7 +1172,9 @@ static void d3d9InitializeRendererVtable(void) {
     d3d9RendererVtable.setGuiProjection = d3d9SetGuiProjection;
     d3d9RendererVtable.endGUI = d3d9EndGUI;
     d3d9RendererVtable.drawSprite = d3d9DrawSprite;
-    d3d9RendererVtable.drawSpritePart = d3d9DrawSpritePart;
+    d3d9RendererVtable.drawSpritePart = d3d9DrawSpritePartModern;
+    d3d9RendererVtable.drawSpritePartColor = d3d9DrawSpritePartColorModern;
+    d3d9RendererVtable.drawTextUI = d3d9DrawTextColorModern;
     d3d9RendererVtable.drawSpritePos = d3d9DrawSpritePos;
     d3d9RendererVtable.drawRectangle = d3d9DrawRectangle;
     d3d9RendererVtable.drawRectangleColor = d3d9DrawRectangleColor;
