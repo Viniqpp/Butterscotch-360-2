@@ -129,6 +129,8 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     dr->gameW = (int32_t)dataWin->gen8.defaultWindowWidth;
     dr->gameH = (int32_t)dataWin->gen8.defaultWindowHeight;
     dr->blendMode = bm_normal;
+    dr->textureBytesAllocated = 0;
+    dr->maxTextureBytes = 128u * 1024u * 1024u;
     renderer->blendFactors.src = bm_src_alpha;
     renderer->blendFactors.dst = bm_inv_src_alpha;
     renderer->blendFactors.srcAlpha = bm_src_alpha;
@@ -237,8 +239,8 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 
     for (uint32_t i = 0; i < dr->textureCount; i++) {
         Texture* txtr = &dataWin->txtr.textures[i];
-        if (!txtr->blobData || txtr->blobSize == 0 || txtr->blobSize > 0x7fffffffU) {
-            DbgPrint("BS: invalid TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
+        if (!txtr->blobData || txtr->blobSize == 0 || txtr->blobSize > 32u * 1024u * 1024u) {
+            DbgPrint("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
             continue;
         }
         int w = 0, h = 0, channels = 0;
@@ -247,8 +249,10 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
             OutputDebugStringA("Failed to decode TXTR page\n");
             continue;
         }
-        if (w <= 0 || h <= 0 || w > 0x1fffffff) {
-            DbgPrint("BS: invalid TXTR dimensions for page %u (%d x %d)\n", i, w, h);
+        uint64_t pixelBytes = (uint64_t)w * (uint64_t)h * 4u;
+        if (w <= 0 || h <= 0 || w > 8192 || h > 8192 ||
+            pixelBytes == 0 || pixelBytes > 64u * 1024u * 1024u) {
+            DbgPrint("BS: invalid or oversized TXTR dimensions for page %u (%d x %d)\n", i, w, h);
             stbi_image_free(pixels);
             continue;
         }
@@ -256,27 +260,26 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         dr->textureWidths[i] = w;
         dr->textureHeights[i] = h;
 
-        // On Xbox 360, GPU textures use a tiled memory layout.
-        // Create a LINEAR texture first, fill it, then create a tiled copy.
+        // Xbox 360 textures are uploaded through a linear surface. Keep a
+        // strict aggregate budget so malformed WADs cannot exhaust unified RAM.
         IDirect3DTexture9* linearTex = NULL;
-        IDirect3DTexture9* tex = NULL;
-
-        // Create and fill the linear texture. Every HRESULT is checked before
-        // dereferencing the returned lock or publishing the texture pointer.
         HRESULT textureHr = dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8,
                                                D3DPOOL_DEFAULT, &linearTex, NULL);
         if (SUCCEEDED(textureHr) && linearTex) {
             D3DLOCKED_RECT lr;
             textureHr = linearTex->LockRect(0, &lr, NULL, 0);
             if (SUCCEEDED(textureHr) && lr.pBits) {
-                if (lr.Pitch < w * 4) {
-                    textureHr = E_FAIL;
-                    linearTex->UnlockRect(0);
-                    linearTex->Release();
+                uint64_t allocationBytes = lr.Pitch > 0 ? (uint64_t)lr.Pitch * (uint64_t)h : 0;
+                if (lr.Pitch < w * 4 || allocationBytes == 0 ||
+                    allocationBytes > dr->maxTextureBytes ||
+                    dr->textureBytesAllocated > dr->maxTextureBytes - (uint32_t)allocationBytes) {
+                    textureHr = E_OUTOFMEMORY;
+                    HRESULT unlockHr = linearTex->UnlockRect(0);
+                    if (FAILED(unlockHr)) textureHr = unlockHr;
                 } else {
                     for (int y2 = 0; y2 < h; y2++) {
-                        uint8_t* src = pixels + y2 * w * 4;
-                        DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + y2 * lr.Pitch);
+                        uint8_t* src = pixels + (size_t)y2 * (size_t)w * 4u;
+                        DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + (size_t)y2 * (size_t)lr.Pitch);
                         for (int x2 = 0; x2 < w; x2++) {
                             uint8_t r = src[x2 * 4 + 0];
                             uint8_t g = src[x2 * 4 + 1];
@@ -288,22 +291,25 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
                     }
                     textureHr = linearTex->UnlockRect(0);
                     if (SUCCEEDED(textureHr)) {
-                        tex = linearTex;
-                        dr->textures[i] = tex;
-                    } else {
-                        linearTex->Release();
+                        dr->textures[i] = linearTex;
+                        dr->textureBytesAllocated += (uint32_t)allocationBytes;
+                        linearTex = NULL;
                     }
                 }
-            } else {
-                linearTex->Release();
+            } else if (SUCCEEDED(textureHr)) {
+                HRESULT unlockHr = linearTex->UnlockRect(0);
+                if (FAILED(unlockHr)) textureHr = unlockHr;
             }
+        } else if (SUCCEEDED(textureHr)) {
+            textureHr = E_FAIL;
         }
+
+        if (linearTex) linearTex->Release();
         if (!dr->textures[i]) {
             DbgPrint("BS: D3D9 texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)textureHr);
         }
         stbi_image_free(pixels);
     }
-
     dr->originalTexturePageCount = dataWin->txtr.count;
     dr->originalTpagCount = dataWin->tpag.count;
     dr->originalSpriteCount = dataWin->sprt.count;
