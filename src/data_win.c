@@ -2972,27 +2972,37 @@ static void parseTXTR(BinaryReader* reader, DataWin* dw, size_t chunkEnd, bool l
 
 void DataWin_loadTxtrIfNeeded(DataWin* dw, uint32_t textureId) {
     Txtr* t = &dw->txtr;
+    if (textureId >= t->count) return;
     Texture* tex = &t->textures[textureId];
 
-    if (tex->blobOffset == 0 || tex->blobSize == 0) return;
-    if (tex->blobData != nullptr) return;
-
-    if (!dw->lazyLoadFile) {
-        logWarn("loadTxtrIfNeeded: called without a lazy load file.\n");
+    if (tex->blobOffset == 0 || tex->blobSize == 0 || tex->blobData != nullptr) return;
+    if (!dw->lazyLoadFile || tex->blobOffset > 0x7fffffffU) {
+        logWarn("loadTxtrIfNeeded: no usable lazy-load file/offset for texture %u.\n", textureId);
         return;
     }
 
-    tex->blobData = (uint8_t *)safeMalloc(tex->blobSize);
-
-    memset(tex->blobData, 0, tex->blobSize);
-    long old_seek = ftell(dw->lazyLoadFile);
-    fseek(dw->lazyLoadFile, tex->blobOffset, SEEK_SET);
-    size_t read = fread(tex->blobData, 1, tex->blobSize, dw->lazyLoadFile);
-    fseek(dw->lazyLoadFile, old_seek, SEEK_SET);
-
-    if (read != tex->blobSize) {
-        logWarn("loadTxtrIfNeeded: couldn't read %u bytes to load a texture.\n", tex->blobSize);
+    long oldSeek = ftell(dw->lazyLoadFile);
+    if (oldSeek < 0 || fseek(dw->lazyLoadFile, (long)tex->blobOffset, SEEK_SET) != 0) {
+        logWarn("loadTxtrIfNeeded: failed to seek to texture %u.\n", textureId);
+        if (oldSeek >= 0) fseek(dw->lazyLoadFile, oldSeek, SEEK_SET);
+        return;
     }
+
+    uint8_t* data = (uint8_t*)malloc(tex->blobSize);
+    if (!data) {
+        fseek(dw->lazyLoadFile, oldSeek, SEEK_SET);
+        logWarn("loadTxtrIfNeeded: out of memory for texture %u.\n", textureId);
+        return;
+    }
+
+    size_t read = fread(data, 1, tex->blobSize, dw->lazyLoadFile);
+    bool restored = fseek(dw->lazyLoadFile, oldSeek, SEEK_SET) == 0;
+    if (read != tex->blobSize || !restored) {
+        logWarn("loadTxtrIfNeeded: short read or failed cursor restore for texture %u.\n", textureId);
+        free(data);
+        return;
+    }
+    tex->blobData = data;
 }
 
 static void parseAUDO(BinaryReader* reader, DataWin* dw, bool loadAudioDataLazily) {
@@ -3028,27 +3038,38 @@ static void parseAUDO(BinaryReader* reader, DataWin* dw, bool loadAudioDataLazil
 
 void DataWin_loadAudoIfNeeded(DataWin* dw, uint32_t audioEntryId) {
     Audo* a = &dw->audo;
+    if (audioEntryId >= a->count) return;
     AudioEntry* entry = &a->entries[audioEntryId];
 
-    if (!entry->present || entry->dataSize == 0) return;
-    if (entry->data != nullptr) return;
-
-    if (!dw->lazyLoadFile) {
-        logError("loadAudoIfNeeded: called without a lazy load file.\n");
+    if (!entry->present || entry->dataSize == 0 || entry->data != nullptr) return;
+    if (!dw->lazyLoadFile || entry->dataOffset > 0x7fffffffU) {
+        logError("loadAudoIfNeeded: no usable lazy-load file/offset for audio entry %u.\n", audioEntryId);
         return;
     }
 
-    entry->data = (uint8_t *)safeMalloc(entry->dataSize);
-
-    memset(entry->data, 0, entry->dataSize);
-    long old_seek = ftell(dw->lazyLoadFile);
-    fseek(dw->lazyLoadFile, entry->dataOffset, SEEK_SET);
-    size_t read = fread(entry->data, 1, entry->dataSize, dw->lazyLoadFile);
-    fseek(dw->lazyLoadFile, old_seek, SEEK_SET);
-
-    if (read != entry->dataSize) {
-        logError("loadAudoIfNeeded: couldn't read %u bytes to load audio entry %u.\n", entry->dataSize, audioEntryId);
+    long oldSeek = ftell(dw->lazyLoadFile);
+    if (oldSeek < 0 || fseek(dw->lazyLoadFile, (long)entry->dataOffset, SEEK_SET) != 0) {
+        logError("loadAudoIfNeeded: failed to seek to audio entry %u.\n", audioEntryId);
+        if (oldSeek >= 0) fseek(dw->lazyLoadFile, oldSeek, SEEK_SET);
+        return;
     }
+
+    uint8_t* data = (uint8_t*)malloc(entry->dataSize);
+    if (!data) {
+        fseek(dw->lazyLoadFile, oldSeek, SEEK_SET);
+        logError("loadAudoIfNeeded: out of memory for audio entry %u.\n", audioEntryId);
+        return;
+    }
+
+    size_t read = fread(data, 1, entry->dataSize, dw->lazyLoadFile);
+    bool restored = fseek(dw->lazyLoadFile, oldSeek, SEEK_SET) == 0;
+    if (read != entry->dataSize || !restored) {
+        logError("loadAudoIfNeeded: short read or failed cursor restore for audio entry %u.\n", audioEntryId);
+        free(data);
+        return;
+    }
+    // Publish only complete data so a failed load remains retryable.
+    entry->data = data;
 }
 
 // ===[ MAIN PARSE FUNCTION ]===
