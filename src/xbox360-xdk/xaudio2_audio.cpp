@@ -1398,9 +1398,11 @@ static int32_t xdkCreateStream(AudioSystem* audio, const char* filename) {
 
 static bool xdkDestroyStream(AudioSystem* audio, int32_t streamIndex) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    int32_t slot = streamIndex - XDK_AUDIO_STREAM_INDEX_BASE;
-    if (!xa || slot < 0 || slot >= XDK_MAX_AUDIO_STREAMS || !xa->streams[slot].active)
+    if (!xa || streamIndex < XDK_AUDIO_STREAM_INDEX_BASE ||
+        streamIndex >= XDK_AUDIO_STREAM_INDEX_BASE + XDK_MAX_AUDIO_STREAMS)
         return false;
+    int32_t slot = streamIndex - XDK_AUDIO_STREAM_INDEX_BASE;
+    if (!xa->streams[slot].active) return false;
 
     XdkInstanceArray* arr = Instances(xa);
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
