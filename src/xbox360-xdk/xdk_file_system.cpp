@@ -266,11 +266,11 @@ static void xdkBinaryRewrite(FileSystem* fs, void* handle) {
     SetLastError(NO_ERROR);
     DWORD position = SetFilePointer((HANDLE)handle, 0, NULL, FILE_BEGIN);
     if (position == INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR) {
-        DbgPrint("BS: BinaryRewrite seek failed: 0x%08X\\n", (unsigned)GetLastError());
+        OutputDebugStringA("BS: BinaryRewrite seek failed\n");
         return;
     }
     if (!SetEndOfFile((HANDLE)handle)) {
-        DbgPrint("BS: BinaryRewrite truncate failed: 0x%08X\\n", (unsigned)GetLastError());
+        OutputDebugStringA("BS: BinaryRewrite truncate failed\n");
     }
 }
 
