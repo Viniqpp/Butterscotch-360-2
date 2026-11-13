@@ -6,6 +6,9 @@
 #include <float.h>
 #include <math.h>
 
+#define XDK_MAX_ENCODED_AUDIO_BYTES (32u * 1024u * 1024u)
+#define XDK_MAX_ACTIVE_PCM_BYTES (96u * 1024u * 1024u)
+
 // stb_vorbis on big-endian Xbox 360:
 // Disable the fast float-to-int path which has endian assumptions.
 // Use the slow but portable path instead.
@@ -25,6 +28,7 @@ struct XdkSoundInstance {
     bool active;
     bool paused;
     bool loop;
+    XdkAudioSystem* owner;
     uint32_t positionOffsetSamples;
     uint64_t samplesPlayedAtSeek;
     int32_t soundIndex;
@@ -102,9 +106,17 @@ static void destroyInstance(XdkSoundInstance* inst) {
         inst->pVoice = NULL;
     }
     if (inst->pcmData) {
+        if (inst->owner) {
+            if (inst->owner->activePcmBytes >= inst->pcmSize)
+                inst->owner->activePcmBytes -= inst->pcmSize;
+            else
+                inst->owner->activePcmBytes = 0;
+        }
         free(inst->pcmData);
         inst->pcmData = NULL;
     }
+    inst->pcmSize = 0;
+    inst->owner = NULL;
     inst->active = false;
 }
 
@@ -142,6 +154,8 @@ static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileS
     arrput(xa->base.audioGroups, dataWin);
     xa->fileSystem = fileSystem;
     xa->masterGain = 1.0f;
+    xa->activePcmBytes = 0;
+    xa->maxPcmBytes = XDK_MAX_ACTIVE_PCM_BYTES;
 
     HRESULT hr = XAudio2Create((IXAudio2**)&xa->pXAudio2, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr)) {
@@ -312,8 +326,8 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             destroyInstance(inst);
             return -1;
         }
-        if (entry->dataSize > 0x7fffffffU) {
-            DbgPrint("BS: embedded audio entry is too large\n");
+        if (entry->dataSize > XDK_MAX_ENCODED_AUDIO_BYTES) {
+            DbgPrint("BS: embedded audio entry exceeds the encoded-audio memory budget\n");
             destroyInstance(inst);
             return -1;
         }
@@ -342,7 +356,8 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             return -1; }
         if (fseek(f, 0, SEEK_END) != 0) { fclose(f); destroyInstance(inst); return -1; }
         long fileLength = ftell(f);
-        if (fileLength <= 0 || fileLength > 0x7fffffffL || fseek(f, 0, SEEK_SET) != 0) {
+        if (fileLength <= 0 || fileLength > (long)XDK_MAX_ENCODED_AUDIO_BYTES ||
+            fseek(f, 0, SEEK_SET) != 0) {
             fclose(f); destroyInstance(inst); return -1;
         }
         oggSize = (int)fileLength;
@@ -497,10 +512,22 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         return -1;
     }
 
+    uint32_t decodedPcmSize = (uint32_t)(sampleCount * channels * sizeof(short));
+    if (decodedPcmSize == 0 || decodedPcmSize > xa->maxPcmBytes ||
+        xa->activePcmBytes > xa->maxPcmBytes - decodedPcmSize) {
+        DbgPrint("BS: decoded audio exceeds active PCM budget (requested=%u active=%u limit=%u)\n",
+                 decodedPcmSize, xa->activePcmBytes, xa->maxPcmBytes);
+        free(pcm);
+        destroyInstance(inst);
+        return -1;
+    }
+
     inst->sampleRate = (uint32_t)sampleRate;
     inst->channels = (uint16_t)channels;
-    inst->pcmSize = (uint32_t)(sampleCount * channels * sizeof(short));
+    inst->pcmSize = decodedPcmSize;
     inst->pcmData = (uint8_t*)pcm;
+    inst->owner = xa;
+    xa->activePcmBytes += decodedPcmSize;
 
     // Xbox 360 XAudio2 expects big-endian PCM samples.
     // WAV samples were already byte-swapped during parsing above.
@@ -954,7 +981,8 @@ static bool xdkDestroyStream(AudioSystem* audio, int32_t streamIndex) {
 
 static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t bytes, bool loop) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    if (!xa || !xa->initialized || !data || bytes == 0 || bytes > 0x7fffffffU) return -1;
+    if (!xa || !xa->initialized || !data || bytes == 0 ||
+        bytes > XDK_MAX_ENCODED_AUDIO_BYTES) return -1;
 
     int stbErr = 0;
     stb_vorbis* vorbis = stb_vorbis_open_memory(data, (int)bytes, &stbErr, NULL);
@@ -1012,10 +1040,20 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
     inst->sondPitch = 1.0f;
     inst->sondVolume = 1.0f;
     inst->currentGain = inst->targetGain = inst->startGain = 1.0f;
+    if (pcmBytes > xa->maxPcmBytes ||
+        xa->activePcmBytes > xa->maxPcmBytes - (uint32_t)pcmBytes) {
+        DbgPrint("BS: encoded PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
+                 (unsigned)pcmBytes, xa->activePcmBytes, xa->maxPcmBytes);
+        free(pcm);
+        return -1;
+    }
+
     inst->sampleRate = info.sample_rate;
     inst->channels = (uint16_t)info.channels;
     inst->pcmData = (uint8_t*)pcm;
     inst->pcmSize = (uint32_t)pcmBytes;
+    inst->owner = xa;
+    xa->activePcmBytes += (uint32_t)pcmBytes;
 
     WAVEFORMATEXTENSIBLE wfx;
     memset(&wfx, 0, sizeof(wfx));
