@@ -230,11 +230,14 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     if (sound->volume >= 0) inst->sondVolume = sound->volume;
 
     int32_t groupIndex = sound->audioGroup < 0 ? 0 : sound->audioGroup;
-    if (groupIndex > 0 && arrlen(audio->audioGroups) <= groupIndex)
+    if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex))
         xdkGroupLoad(audio, groupIndex);
-    DataWin* audioData = (groupIndex >= 0 && arrlen(audio->audioGroups) > groupIndex)
-        ? audio->audioGroups[groupIndex] : dw;
-    if (audioData == NULL) audioData = dw;
+    if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex)) {
+        DbgPrint("BS: audio group %d is not loaded; refusing sound %d\n", groupIndex, soundIndex);
+        destroyInstance(inst);
+        return -1;
+    }
+    DataWin* audioData = groupIndex == 0 ? dw : audio->audioGroups[groupIndex];
 
     // Modern WAD flags distinguish regular external audio from AUDO data.
     bool isRegular = (sound->flags & AUDIO_ENTRY_FLAG_REGULAR) == AUDIO_ENTRY_FLAG_REGULAR;
@@ -256,6 +259,11 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         if (!entry->data || entry->dataSize == 0) {
             DbgPrint("BS: empty audio entry\n");
             return inst->instanceId;
+        }
+        if (entry->dataSize > 0x7fffffffU) {
+            DbgPrint("BS: embedded audio entry is too large\n");
+            destroyInstance(inst);
+            return -1;
         }
         oggData = entry->data;
         oggSize = (int)entry->dataSize;
@@ -691,51 +699,50 @@ static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
         DbgPrint("BS: requested invalid audio group %d\n", groupIndex);
         return;
     }
+
+    // Preserve sparse group indices with NULL entries. NULL means "not loaded"
+    // and remains retryable; a parsed DataWin is the only loaded state.
     while (arrlen(audio->audioGroups) <= groupIndex) {
-        int32_t nextIndex = (int32_t)arrlen(audio->audioGroups);
-        if (nextIndex != groupIndex) {
-            DataWin* placeholder = (DataWin*)calloc(1, sizeof(DataWin));
-            arrput(audio->audioGroups, placeholder);
-            continue;
-        }
-
-        AudioGroup* group = &audio->dw->agrp.audioGroups[groupIndex];
-        char defaultPath[64];
-        const char* relativePath = group->path;
-        if (!relativePath || !relativePath[0]) {
-            sprintf(defaultPath, "audiogroup%d.dat", groupIndex);
-            relativePath = defaultPath;
-        }
-
-        FileSystem* fs = ((XdkAudioSystem*)audio)->fileSystem;
-        if (!fs || !fs->vtable->fileExists(fs, relativePath)) {
-            DbgPrint("BS: audio group %d missing: %s\n", groupIndex, relativePath);
-            DataWin* placeholder = (DataWin*)calloc(1, sizeof(DataWin));
-            arrput(audio->audioGroups, placeholder);
-            break;
-        }
-
-        char* fullPath = fs->vtable->resolvePath(fs, relativePath);
-        if (!fullPath) {
-            DataWin* placeholder = (DataWin*)calloc(1, sizeof(DataWin));
-            arrput(audio->audioGroups, placeholder);
-            break;
-        }
-
-        DataWinParserOptions options;
-        memset(&options, 0, sizeof(options));
-        options.parseAudo = true;
-        options.lazyLoadAudio = audio->dw->lazyLoadAudio;
-        if (audio->dw->mappedFile) options.loadType = DATAWINLOADTYPE_MAP_FILE;
-        DataWin* groupData = DataWin_parse(fullPath, options);
-        free(fullPath);
-        if (!groupData) groupData = (DataWin*)calloc(1, sizeof(DataWin));
-        arrput(audio->audioGroups, groupData);
+        DataWin* empty = NULL;
+        arrput(audio->audioGroups, empty);
     }
+    if (audio->audioGroups[groupIndex] != NULL) return;
+
+    AudioGroup* group = &audio->dw->agrp.audioGroups[groupIndex];
+    char defaultPath[64];
+    const char* relativePath = group->path;
+    if (!relativePath || !relativePath[0]) {
+        sprintf(defaultPath, "audiogroup%d.dat", groupIndex);
+        relativePath = defaultPath;
+    }
+
+    FileSystem* fs = ((XdkAudioSystem*)audio)->fileSystem;
+    if (!fs || !fs->vtable->fileExists(fs, relativePath)) {
+        DbgPrint("BS: audio group %d missing: %s\n", groupIndex, relativePath);
+        return;
+    }
+
+    char* fullPath = fs->vtable->resolvePath(fs, relativePath);
+    if (!fullPath) return;
+
+    DataWinParserOptions options;
+    memset(&options, 0, sizeof(options));
+    options.parseAudo = true;
+    options.lazyLoadAudio = audio->dw->lazyLoadAudio;
+    if (audio->dw->mappedFile) options.loadType = DATAWINLOADTYPE_MAP_FILE;
+    DataWin* groupData = DataWin_parse(fullPath, options);
+    free(fullPath);
+    if (!groupData) {
+        DbgPrint("BS: audio group %d parse failed: %s\n", groupIndex, relativePath);
+        return;
+    }
+
+    audio->audioGroups[groupIndex] = groupData;
 }
 
 static bool xdkGroupIsLoaded(AudioSystem* audio, int32_t groupIndex) {
-    return groupIndex >= 0 && arrlen(audio->audioGroups) > groupIndex;
+    return groupIndex >= 0 && (uint32_t)groupIndex < arrlen(audio->audioGroups) &&
+           audio->audioGroups[groupIndex] != NULL;
 }
 
 
