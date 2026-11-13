@@ -699,23 +699,21 @@ static void xdkStopSound(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
 
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    if (xdkIsInstanceId(soundOrInstance)) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
         if (inst) destroyInstance(inst);
-    } else if (soundOrInstance >= 0) {
-        for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-            if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance)
-                destroyInstance(&arr->instances[i]);
-        }
+        return;
+    }
+    if (soundOrInstance < 0) return;
+    for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+        if (arr->instances[i].active && arr->instances[i].soundIndex == soundOrInstance)
+            destroyInstance(&arr->instances[i]);
     }
 }
 
 static void xdkStopAll(AudioSystem* audio) {
-    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    XdkInstanceArray* arr = Instances(xa);
+    XdkInstanceArray* arr = Instances((XdkAudioSystem*)audio);
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
-        // Encoded FMOD-owned voices are deliberately not affected by game
-        // sound stop-all operations.
         if (arr->instances[i].active && arr->instances[i].soundIndex >= 0)
             destroyInstance(&arr->instances[i]);
     }
@@ -725,7 +723,7 @@ static bool xdkIsPlaying(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
 
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    if (xdkIsInstanceId(soundOrInstance)) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
         if (!inst || inst->paused || !inst->pVoice) return false;
         XAUDIO2_VOICE_STATE state;
@@ -771,7 +769,7 @@ static void xdkResumeInstance(XdkSoundInstance* inst) {
 static void xdkPauseSound(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    if (xdkIsInstanceId(soundOrInstance)) {
         xdkPauseInstance(findById(xa, soundOrInstance));
         return;
     }
@@ -785,7 +783,7 @@ static void xdkPauseSound(AudioSystem* audio, int32_t soundOrInstance) {
 static void xdkResumeSound(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     XdkInstanceArray* arr = Instances(xa);
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    if (xdkIsInstanceId(soundOrInstance)) {
         xdkResumeInstance(findById(xa, soundOrInstance));
         return;
     }
@@ -830,14 +828,24 @@ static void xdkApplyGainTarget(XdkAudioSystem* xa, AudioSystem* audio,
 
 static void xdkSetSoundGain(AudioSystem* audio, int32_t soundOrInstance, float gain, uint32_t timeMs) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    XdkInstanceArray* arr = Instances(xa);
+    if (soundOrInstance >= XDK_AUDIO_STREAM_INDEX_BASE) {
+        int32_t slot = soundOrInstance - XDK_AUDIO_STREAM_INDEX_BASE;
+        if (slot < 0 || slot >= XDK_MAX_AUDIO_STREAMS || !xa->streams[slot].active) return;
+        xa->streams[slot].initialGain = gain;
+        for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+            XdkSoundInstance* inst = &arr->instances[i];
+            if (inst->active && inst->soundIndex == soundOrInstance)
+                xdkApplyGainTarget(xa, audio, inst, gain, timeMs);
+        }
+        return;
+    }
+    if (xdkIsInstanceId(soundOrInstance)) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
         if (inst) xdkApplyGainTarget(xa, audio, inst, gain, timeMs);
         return;
     }
     if (soundOrInstance < 0) return;
-
-    XdkInstanceArray* arr = Instances(xa);
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
         XdkSoundInstance* inst = &arr->instances[i];
         if (inst->active && inst->soundIndex == soundOrInstance)
@@ -847,7 +855,12 @@ static void xdkSetSoundGain(AudioSystem* audio, int32_t soundOrInstance, float g
 
 static float xdkGetSoundGain(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    if (soundOrInstance >= XDK_AUDIO_STREAM_INDEX_BASE) {
+        int32_t slot = soundOrInstance - XDK_AUDIO_STREAM_INDEX_BASE;
+        return slot >= 0 && slot < XDK_MAX_AUDIO_STREAMS && xa->streams[slot].active
+            ? xa->streams[slot].initialGain : 0.0f;
+    }
+    if (xdkIsInstanceId(soundOrInstance)) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
         return inst ? inst->currentGain : 0.0f;
     }
@@ -863,13 +876,24 @@ static float xdkGetSoundGain(AudioSystem* audio, int32_t soundOrInstance) {
 static void xdkSetSoundPitch(AudioSystem* audio, int32_t soundOrInstance, float pitch) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
     if (!(pitch >= XAUDIO2_MIN_FREQ_RATIO && pitch <= XAUDIO2_MAX_FREQ_RATIO)) return;
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    XdkInstanceArray* arr = Instances(xa);
+    if (soundOrInstance >= XDK_AUDIO_STREAM_INDEX_BASE) {
+        int32_t slot = soundOrInstance - XDK_AUDIO_STREAM_INDEX_BASE;
+        if (slot < 0 || slot >= XDK_MAX_AUDIO_STREAMS || !xa->streams[slot].active) return;
+        xa->streams[slot].initialPitch = pitch;
+        for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
+            XdkSoundInstance* inst = &arr->instances[i];
+            if (inst->active && inst->soundIndex == soundOrInstance)
+                xdkApplyInstancePitch(inst, pitch);
+        }
+        return;
+    }
+    if (xdkIsInstanceId(soundOrInstance)) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
         if (inst) xdkApplyInstancePitch(inst, pitch);
         return;
     }
     if (soundOrInstance < 0) return;
-    XdkInstanceArray* arr = Instances(xa);
     for (int i = 0; i < XDK_MAX_SOUND_INSTANCES; i++) {
         XdkSoundInstance* inst = &arr->instances[i];
         if (inst->active && inst->soundIndex == soundOrInstance)
@@ -879,7 +903,12 @@ static void xdkSetSoundPitch(AudioSystem* audio, int32_t soundOrInstance, float 
 
 static float xdkGetSoundPitch(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
+    if (soundOrInstance >= XDK_AUDIO_STREAM_INDEX_BASE) {
+        int32_t slot = soundOrInstance - XDK_AUDIO_STREAM_INDEX_BASE;
+        return slot >= 0 && slot < XDK_MAX_AUDIO_STREAMS && xa->streams[slot].active
+            ? xa->streams[slot].initialPitch : 1.0f;
+    }
+    if (xdkIsInstanceId(soundOrInstance)) {
         XdkSoundInstance* inst = findById(xa, soundOrInstance);
         return inst ? inst->pitch : 1.0f;
     }
