@@ -142,7 +142,7 @@ VOID __cdecl main() {
     parseOpts.parseSprt = true;  parseOpts.parseBgnd = true;  parseOpts.parsePath = true;
     parseOpts.parseScpt = true;  parseOpts.parseGlob = true;  parseOpts.parseShdr = true;
     parseOpts.parseFont = true;  parseOpts.parseTmln = true;  parseOpts.parseObjt = true;
-    parseOpts.parseRoom = true;  parseOpts.parseTpag = true;  parseOpts.parseCode = true;
+    parseOpts.parseRoom = true;  parseOpts.parseTgin = true;  parseOpts.parseTpag = true;  parseOpts.parseCode = true;
     parseOpts.parseVari = true;  parseOpts.parseFunc = true;  parseOpts.parseStrg = true;
     parseOpts.parseTxtr = true;  parseOpts.parseAudo = true;
     parseOpts.skipLoadingPreciseMasksForNonPreciseSprites = true;
