@@ -1,6 +1,6 @@
 # Butterscotch 360 Refresh 2 — Migration Audit
 
-Status: initial migration audit; no runtime code has been ported yet.
+Status: partial source migration committed; not yet build-verified with the Xbox 360 XDK.
 
 ## Goal
 
@@ -66,40 +66,54 @@ These are regression targets, not assumptions about the modern port.
 
 ### 1. Establish a clean modern core baseline
 
-Bring the current upstream core into the working branch while preserving the
-Xbox 360 platform directory and XDK project files as a separate integration
-layer. Keep the original `main` branch untouched.
+**Source snapshot imported.** The working branch now contains 134 selected
+source/dependency blobs from upstream commit `0c94bfb`, while preserving the
+Xbox 360 XDK files. The legacy `main` branch has not been modified. This is the
+runtime/core subset selected for the XDK integration, not a wholesale copy of
+every upstream desktop/mobile backend or test asset.
 
 ### 2. Reconcile platform/build configuration
 
-Compare upstream CMake/platform selection and source lists with the XDK Visual
-Studio project. Identify every source file required by the modern core and
-every desktop-only dependency that must be excluded or replaced for Xbox 360.
+**Initial XDK project reconciliation committed.** `Butterscotch360.vcxproj`
+now includes the modern root core, default font, image decoder, FMOD
+compatibility sources, disabled-physics implementation, null-video backend and
+required vendored libraries. Desktop/GL loop code is excluded from this XDK
+project. The legacy root `CMakeLists.txt` and its desktop CI workflow still need
+separate reconciliation; they are not evidence of an XDK build.
 
 ### 3. Port the filesystem first
 
-Implement the modern `FileSystem` contract in the XDK backend. Verify path
-normalization, short reads, exact reads, writes, directory enumeration and
-streaming behavior. Check every XDK file API return value and byte count.
+**Adapter implementation committed; not XDK-tested.** The XDK filesystem now
+fills all 20 modern vtable entries: path resolution, text/binary file access,
+rename/delete, streaming binary handles, directory operations and directory
+enumeration. Reads/writes check return values and exact byte counts. Runtime
+validation is still required for XDK-specific filesystem behavior.
 
 ### 4. Port audio
 
-Adapt XAudio2 to the modern `AudioSystem` contract. Keep decoding and playback
-separate, then validate pitch, looping, pause/resume, streaming, group gain and
-cleanup behavior.
+**Partial adapter implementation committed; not XDK-tested.** XAudio2 now binds
+the modern 31-entry audio vtable, retains WAV/OGG playback, pitch, looping,
+pause/resume and gain, and includes audio-group indexing plus lazy AUDO loading.
+The stereo backend does not yet implement spatial routing, stream voices,
+encoded playback or seeking; these callbacks return safe no-op/failure results
+rather than claiming support. Audio-group and playback behavior still need
+runtime testing.
 
 ### 5. Port rendering incrementally
 
-Adapt D3D9 to the modern renderer contract in small groups: frame/view lifecycle,
-2D primitives and sprites, render targets/surfaces, blend state, shaders, and
-3D/vertex operations. Unsupported capabilities must be explicit and safe;
-they must not leave uninitialized vtable entries.
+**Pending separate renderer audit.** The old D3D9 renderer still implements the
+legacy contract and is not yet compatible with modern `Runner_create`'s
+renderer-vtable validation. This is deliberately not being patched in parallel
+with the independent D3D9 audit, to avoid conflicting edits.
 
 ### 6. Reconcile the main loop and input
 
-Use the modern runner lifecycle and input expectations. Retain XInput support,
-but avoid carrying over old assumptions about frame pacing, room drawing and
-audio update order without validating them against upstream.
+**Initial integration committed.** The XDK entry point now uses the modern
+`Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, seed)` signature
+and the modern frame sequence (`Runner_drawPre`, `Runner_beginFrame`,
+`Runner_drawViews`, draw-post and GUI passes). XInput-to-keyboard mappings are
+retained, with disconnected-controller state cleared. WAD 17 TGIN parsing is
+enabled. Timing and room-transition behavior still require runtime testing.
 
 ### 7. Build and test on the actual toolchain
 
@@ -110,13 +124,20 @@ built and tested.
 
 ## Current status
 
-- [x] Confirm repository write access.
-- [x] Confirm working branch exists and is based on the old Xbox port's `main`.
-- [x] Inspect modern renderer/audio/filesystem contracts.
-- [x] Identify major runtime and data-format drift.
-- [ ] Import/reconcile modern upstream core.
-- [ ] Port XDK filesystem.
-- [ ] Port XAudio2 backend.
-- [ ] Port D3D9 renderer.
-- [ ] Reconcile XDK build project and main loop.
-- [ ] Build and test with XDK.
+- [x] Confirm repository write access and create the isolated development branch.
+- [x] Inspect modern renderer/audio/filesystem contracts and major API drift.
+- [x] Import the selected modern core/source/dependency snapshot.
+- [x] Implement the expanded XDK filesystem vtable.
+- [x] Adapt XAudio2 to the modern audio vtable (with documented unsupported features).
+- [x] Reconcile the XDK project source lists and modern runner startup/frame lifecycle.
+- [ ] Complete modern D3D9 renderer vtable implementation (separate audit in progress).
+- [ ] Reconcile/retire the legacy desktop CMake + CI configuration.
+- [ ] Compile the XDK project with the compatible Xbox 360 toolchain.
+- [ ] Run Undertale and WAD 17-era Deltarune test cases on hardware/emulator.
+
+## Important build caveat
+
+No Xbox 360 XDK compiler is available in this work session, so none of the
+changes above should be described as compiling or running successfully yet.
+The modern renderer contract still blocks `Runner_create` until D3D9 satisfies
+the required vtable entries.
