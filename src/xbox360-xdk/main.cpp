@@ -361,7 +361,7 @@ VOID __cdecl main() {
 
     // Parse CONFIG.JSN options
     if (configRoot) {
-        JsonValue* disabledArr = JsonReader_getObject(configRoot, "disabledObjects");
+        JsonValue* disabledArr = JsonReader_getJsonValueByKey(configRoot, "disabledObjects");
         if (disabledArr && JsonReader_isArray(disabledArr)) {
             sh_new_strdup(runner->disabledObjects);
             int count = JsonReader_arrayLength(disabledArr);
@@ -374,13 +374,13 @@ VOID __cdecl main() {
             }
         }
 
-        JsonValue* mappingsObj = JsonReader_getObject(configRoot, "controllerMappings");
+        JsonValue* mappingsObj = JsonReader_getJsonValueByKey(configRoot, "controllerMappings");
         if (mappingsObj && JsonReader_isObject(mappingsObj)) {
             xpadMappingCount = JsonReader_objectLength(mappingsObj);
             xpadMappings = (XpadMapping*)malloc(sizeof(XpadMapping) * xpadMappingCount);
             for (int i = 0; i < xpadMappingCount; i++) {
-                const char* btnStr = JsonReader_getObjectKey(mappingsObj, i);
-                JsonValue* gmlVal = JsonReader_getObjectValue(mappingsObj, i);
+                const char* btnStr = JsonReader_getJsonKeyByIndex(mappingsObj, i);
+                JsonValue* gmlVal = JsonReader_getJsonValueByIndex(mappingsObj, i);
                 xpadMappings[i].xpadButton = (WORD)atoi(btnStr);
                 xpadMappings[i].gmlKey = (int32_t)JsonReader_getInt(gmlVal);
             }
