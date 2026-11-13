@@ -231,8 +231,8 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     int oggSize = 0;
     bool freeOggData = false;
 
-    if (isEmbedded) {
-        if (sound->audioFile < 0 || (uint32_t)sound->audioFile >= dw->audo.count) {
+    if (inAudo) {
+        if (sound->audioFile < 0 || (uint32_t)sound->audioFile >= audioData->audo.count) {
             DbgPrint("BS: bad audioFile idx %d (audo count=%d)\n", sound->audioFile, (int)dw->audo.count);
             return inst->instanceId;
         }
@@ -583,7 +583,7 @@ static void xdkSetChannelCount(AudioSystem* audio, int32_t count) {
 
 static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
     if (groupIndex <= 0 || !audio->dw || (uint32_t)groupIndex >= audio->dw->agrp.count) {
-        DbgPrint("BS: requested invalid audio group %d\\n", groupIndex);
+        DbgPrint("BS: requested invalid audio group %d\n", groupIndex);
         return;
     }
     while (arrlen(audio->audioGroups) <= groupIndex) {
@@ -604,7 +604,7 @@ static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
 
         FileSystem* fs = ((XdkAudioSystem*)audio)->fileSystem;
         if (!fs || !fs->vtable->fileExists(fs, relativePath)) {
-            DbgPrint("BS: audio group %d missing: %s\\n", groupIndex, relativePath);
+            DbgPrint("BS: audio group %d missing: %s\n", groupIndex, relativePath);
             DataWin* placeholder = (DataWin*)calloc(1, sizeof(DataWin));
             arrput(audio->audioGroups, placeholder);
             break;
