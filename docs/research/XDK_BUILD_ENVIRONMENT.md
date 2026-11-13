@@ -346,7 +346,7 @@ The following Git blob IDs identify the exact files reviewed from `refresh2/mode
 | `src/xbox360-xdk/d3d9_renderer.cpp` | `aed24e9a03f376046822b851174e6879434c4f48` |
 | `src/xbox360-xdk/d3d9_renderer.h` | `b1f365a341d64b393b8d2be1ae31d4f8adb9df38` |
 | `src/xbox360-xdk/xaudio2_audio.cpp` | `84bb2863b60b37507f9898c1597115f1ac13da09` |
-| `src/xbox360-xdk/xdk_file_system.cpp` | `84bb2863b60b37507f9898c1597115f1ac13da09` |
+| `src/xbox360-xdk/xdk_file_system.cpp` | `04d03335ca8bec185b89c6ce5d97c7c0341685c3` |
 | `src/xbox360-xdk/main.cpp` | `3c8e1cb4d7dc864d4a40c1bae9db3aab51d8378a` |
 
 **Correction to the original report's framing:** the D3D9 problem is more severe and more specific than simply “the legacy renderer does not satisfy the modern vtable.” The current implementation uses a positional initializer whose entries are shifted against the modern vtable layout. This is a concrete ABI/API wiring defect, not just a list of missing optional features.
