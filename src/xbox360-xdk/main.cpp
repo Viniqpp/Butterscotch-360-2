@@ -148,18 +148,18 @@ static void updateNativeGamepad(Runner* runner, const XINPUT_GAMEPAD* pad, bool 
 
 // Mirrors the modern platformSwapBuffers() hook: finish the D3D scene only
 // after the GUI pass has been drawn, then present the completed back buffer.
-static void platformSwapBuffers(IDirect3DDevice9* device) {
-    if (!device) return;
+static void platformSwapBuffers(D3D9Renderer* renderer) {
+    if (!renderer || !renderer->pd3dDevice) return;
+    IDirect3DDevice9* device = (IDirect3DDevice9*)renderer->pd3dDevice;
 
-    HRESULT hr = device->EndScene();
-    if (FAILED(hr)) {
-        DbgPrint("BS: EndScene failed: 0x%08X\\n", (unsigned)hr);
+    if (renderer->sceneActive) {
+        HRESULT hr = device->EndScene();
+        renderer->sceneActive = false;
+        if (FAILED(hr)) DbgPrint("BS: EndScene failed: 0x%08X\\n", (unsigned)hr);
     }
 
-    hr = device->Present(NULL, NULL, NULL, NULL);
-    if (FAILED(hr)) {
-        DbgPrint("BS: Present failed: 0x%08X\\n", (unsigned)hr);
-    }
+    HRESULT hr = device->Present(NULL, NULL, NULL, NULL);
+    if (FAILED(hr)) DbgPrint("BS: Present failed: 0x%08X\\n", (unsigned)hr);
 }
 
 static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
@@ -496,7 +496,7 @@ VOID __cdecl main() {
             Runner_drawPost(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
             renderer->vtable->endFrameEnd(renderer);
             Runner_drawGUI(runner, SCREEN_WIDTH, SCREEN_HEIGHT, gameW, gameH);
-            platformSwapBuffers(pd3dDevice);
+            platformSwapBuffers((D3D9Renderer*)renderer);
 
             Runner_handlePendingRoomChange(runner);
             RunnerKeyboard_beginFrame(runner->keyboard);
