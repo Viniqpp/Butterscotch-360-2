@@ -936,9 +936,13 @@ static float xdkInstanceTrackPosition(XdkSoundInstance* inst) {
 
     uint64_t position = (uint64_t)inst->positionOffsetSamples + played;
     if (inst->loop) {
-        uint64_t loopLength = totalFrames - inst->positionOffsetSamples;
-        if (loopLength > 0)
-            position = (uint64_t)inst->positionOffsetSamples + (played % loopLength);
+        // After a seek, play the tail once, then loop the entire track. This
+        // avoids accidentally turning a seek into a permanent tail-only loop.
+        uint64_t firstPassLength = totalFrames - inst->positionOffsetSamples;
+        if (played < firstPassLength)
+            position = (uint64_t)inst->positionOffsetSamples + played;
+        else
+            position = (played - firstPassLength) % totalFrames;
     } else if (position > totalFrames) {
         position = totalFrames;
     }
@@ -996,20 +1000,46 @@ static void xdkSeekInstance(XdkSoundInstance* inst, float positionSeconds) {
     // update pass will retire it once it observes BuffersQueued == 0.
     if (offset >= totalFrames) return;
 
-    XAUDIO2_BUFFER buffer;
-    memset(&buffer, 0, sizeof(buffer));
-    buffer.Flags = inst->loop ? 0 : XAUDIO2_END_OF_STREAM;
-    buffer.AudioBytes = inst->pcmSize;
-    buffer.pAudioData = inst->pcmData;
-    buffer.PlayBegin = offset;
-    buffer.PlayLength = totalFrames - offset;
-    if (inst->loop) {
-        buffer.LoopBegin = offset;
-        buffer.LoopLength = totalFrames - offset;
-        buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
-    }
+    if (inst->loop && offset > 0) {
+        // Queue the remainder of the current play-through, followed by a
+        // full-track infinite loop. XAudio2 loops within one buffer, so a
+        // single buffer starting at offset would loop only the tail.
+        XAUDIO2_BUFFER firstPass;
+        memset(&firstPass, 0, sizeof(firstPass));
+        firstPass.AudioBytes = inst->pcmSize;
+        firstPass.pAudioData = inst->pcmData;
+        firstPass.PlayBegin = offset;
+        firstPass.PlayLength = totalFrames - offset;
+        hr = inst->pVoice->SubmitSourceBuffer(&firstPass);
+        if (FAILED(hr)) {
+            DbgPrint("BS: seek first-pass SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+            destroyInstance(inst);
+            return;
+        }
 
-    hr = inst->pVoice->SubmitSourceBuffer(&buffer);
+        XAUDIO2_BUFFER loopBuffer;
+        memset(&loopBuffer, 0, sizeof(loopBuffer));
+        loopBuffer.AudioBytes = inst->pcmSize;
+        loopBuffer.pAudioData = inst->pcmData;
+        loopBuffer.PlayLength = totalFrames;
+        loopBuffer.LoopLength = totalFrames;
+        loopBuffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+        hr = inst->pVoice->SubmitSourceBuffer(&loopBuffer);
+    } else {
+        XAUDIO2_BUFFER buffer;
+        memset(&buffer, 0, sizeof(buffer));
+        buffer.Flags = inst->loop ? 0 : XAUDIO2_END_OF_STREAM;
+        buffer.AudioBytes = inst->pcmSize;
+        buffer.pAudioData = inst->pcmData;
+        buffer.PlayBegin = offset;
+        buffer.PlayLength = totalFrames - offset;
+        if (inst->loop) {
+            buffer.LoopBegin = 0;
+            buffer.LoopLength = totalFrames;
+            buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+        }
+        hr = inst->pVoice->SubmitSourceBuffer(&buffer);
+    }
     if (FAILED(hr)) {
         DbgPrint("BS: seek SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
