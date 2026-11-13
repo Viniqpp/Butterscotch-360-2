@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <float.h>
+#include <math.h>
 
 // stb_vorbis on big-endian Xbox 360:
 // Disable the fast float-to-int path which has endian assumptions.
@@ -24,6 +25,8 @@ struct XdkSoundInstance {
     bool active;
     bool paused;
     bool loop;
+    uint32_t positionOffsetSamples;
+    uint64_t samplesPlayedAtSeek;
     int32_t soundIndex;
     int32_t instanceId;
     int32_t priority;
@@ -740,20 +743,74 @@ static float xdkGetSoundPitch(AudioSystem* audio, int32_t soundOrInstance) {
 
 static float xdkGetTrackPosition(AudioSystem* audio, int32_t soundOrInstance) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    if (soundOrInstance >= XDK_SOUND_INSTANCE_ID_BASE) {
-        XdkSoundInstance* inst = findById(xa, soundOrInstance);
-        if (inst && inst->pVoice && inst->sampleRate > 0) {
-            XAUDIO2_VOICE_STATE state;
-            inst->pVoice->GetState(&state, 0);
-            return (float)state.SamplesPlayed / (float)inst->sampleRate;
-        }
-    }
-    return 0.0f;
+    XdkSoundInstance* inst = findById(xa, soundOrInstance);
+    if (!inst || !inst->pVoice || inst->sampleRate == 0 || inst->channels == 0) return 0.0f;
+
+    XAUDIO2_VOICE_STATE state;
+    inst->pVoice->GetState(&state, 0);
+    uint64_t played = state.SamplesPlayed >= inst->samplesPlayedAtSeek
+        ? state.SamplesPlayed - inst->samplesPlayedAtSeek : 0;
+    uint64_t totalFrames = inst->pcmSize / ((uint32_t)inst->channels * sizeof(short));
+    if (totalFrames == 0) return 0.0f;
+
+    uint64_t position = (uint64_t)inst->positionOffsetSamples + played;
+    if (inst->loop) position %= totalFrames;
+    else if (position > totalFrames) position = totalFrames;
+    return (float)position / (float)inst->sampleRate;
 }
 
 static void xdkSetTrackPosition(AudioSystem* audio, int32_t soundOrInstance, float positionSeconds) {
-    (void)audio; (void)soundOrInstance; (void)positionSeconds;
-    // TODO: seek support requires re-submitting buffer from offset
+    XdkAudioSystem* xa = (XdkAudioSystem*)audio;
+    XdkSoundInstance* inst = findById(xa, soundOrInstance);
+    if (!inst || !inst->pVoice || !inst->pcmData || inst->sampleRate == 0 ||
+        inst->channels == 0 || !(positionSeconds >= 0.0f) || positionSeconds > FLT_MAX) return;
+
+    uint32_t totalFrames = inst->pcmSize / ((uint32_t)inst->channels * sizeof(short));
+    if (totalFrames == 0) return;
+    float duration = (float)totalFrames / (float)inst->sampleRate;
+    if (inst->loop && positionSeconds >= duration)
+        positionSeconds = fmodf(positionSeconds, duration);
+
+    uint32_t offset = (uint32_t)(positionSeconds * (float)inst->sampleRate);
+    if (offset >= totalFrames) {
+        if (inst->loop) offset = 0;
+        else offset = totalFrames;
+    }
+
+    HRESULT hr = inst->pVoice->Stop(0);
+    if (FAILED(hr)) return;
+    hr = inst->pVoice->FlushSourceBuffers();
+    if (FAILED(hr)) return;
+
+    XAUDIO2_VOICE_STATE state;
+    inst->pVoice->GetState(&state, 0);
+    inst->samplesPlayedAtSeek = state.SamplesPlayed;
+    inst->positionOffsetSamples = offset;
+
+    // A non-looping seek to/past EOF leaves the voice empty; the regular
+    // update pass will retire it once it observes BuffersQueued == 0.
+    if (offset >= totalFrames) return;
+
+    XAUDIO2_BUFFER buffer;
+    memset(&buffer, 0, sizeof(buffer));
+    buffer.Flags = inst->loop ? 0 : XAUDIO2_END_OF_STREAM;
+    buffer.AudioBytes = inst->pcmSize;
+    buffer.pAudioData = inst->pcmData;
+    buffer.PlayBegin = offset;
+    buffer.PlayLength = totalFrames - offset;
+    if (inst->loop) {
+        buffer.LoopBegin = offset;
+        buffer.LoopLength = totalFrames - offset;
+        buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+    }
+
+    hr = inst->pVoice->SubmitSourceBuffer(&buffer);
+    if (FAILED(hr)) {
+        DbgPrint("BS: seek SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+        return;
+    }
+    hr = inst->pVoice->Start(0);
+    if (FAILED(hr)) DbgPrint("BS: seek Start failed: hr=0x%08X\n", (unsigned)hr);
 }
 
 static void xdkSetMasterGain(AudioSystem* audio, float gain) {
