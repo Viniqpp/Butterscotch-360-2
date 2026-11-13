@@ -214,7 +214,7 @@ VOID __cdecl main() {
                                     &d3dpp, &pd3dDevice);
     if (FAILED(hr)) {
         DbgPrint("BS: FATAL: CreateDevice failed\n");
-        shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, pD3D);
+        shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
     }
     DbgPrint("BS: D3D device created\n");
