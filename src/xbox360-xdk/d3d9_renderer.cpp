@@ -770,6 +770,17 @@ static void d3d9DeleteSprite(Renderer* renderer, int32_t spriteIndex) {
     // TODO: implement dynamic sprite deletion
 }
 
+// Modern RendererVtable includes surfaceID; keep the legacy helper's narrower
+// signature behind an exact-contract adapter.
+static int32_t d3d9CreateSpriteFromSurfaceModern(Renderer* renderer, int32_t surfaceID,
+                                                  int32_t x, int32_t y, int32_t w, int32_t h,
+                                                  bool removeback, bool smooth,
+                                                  int32_t xorig, int32_t yorig) {
+    (void)surfaceID;
+    return d3d9CreateSpriteFromSurface(renderer, x, y, w, h,
+                                       removeback, smooth, xorig, yorig);
+}
+
 // ===[ Modern renderer-contract adapters ]===
 
 // GUI coordinates are independent of the last room view. The platform presents
@@ -1075,7 +1086,7 @@ static void d3d9InitializeRendererVtable(void) {
     d3d9RendererVtable.drawSurfaceTiled = d3d9DrawSurfaceTiled;
     d3d9RendererVtable.flush = d3d9Flush;
     d3d9RendererVtable.clearScreen = d3d9ClearScreen;
-    d3d9RendererVtable.createSpriteFromSurface = d3d9CreateSpriteFromSurface;
+    d3d9RendererVtable.createSpriteFromSurface = d3d9CreateSpriteFromSurfaceModern;
     d3d9RendererVtable.deleteSprite = d3d9DeleteSprite;
     d3d9RendererVtable.gpuSetBlendMode = d3d9GpuSetBlendMode;
     d3d9RendererVtable.gpuSetBlendModeExt = d3d9GpuSetBlendModeExt;
