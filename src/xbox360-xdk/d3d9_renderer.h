@@ -21,6 +21,7 @@ typedef struct {
     void* pPixelShader;
     void* pVertexDecl;
     bool initialized; // true only after required D3D resources are ready
+    bool sceneActive; // BeginScene succeeded and platform has not ended it yet
     bool skipNextClearScreen; // main loop clears before Draw Pre; suppress Runner_drawViews' duplicate clear
     int32_t blendMode;
 
