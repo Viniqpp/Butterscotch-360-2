@@ -305,10 +305,8 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
 }
 
 static void d3d9EndFrame(Renderer* renderer) {
-    D3D9Renderer* dr = (D3D9Renderer*)renderer;
-    flushBatch(dr);
-    Dev(dr)->EndScene();
-    Dev(dr)->Present(NULL, NULL, NULL, NULL);
+    // The platform owns EndScene/Present after the GUI pass.
+    flushBatch((D3D9Renderer*)renderer);
 }
 
 static void d3d9BeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH,
@@ -716,31 +714,336 @@ static void d3d9DeleteSprite(Renderer* renderer, int32_t spriteIndex) {
     // TODO: implement dynamic sprite deletion
 }
 
-// ===[ Vtable ]===
+// ===[ Modern renderer-contract adapters ]===
 
-static RendererVtable d3d9RendererVtable = {
-    d3d9Init,
-    d3d9Destroy,
-    d3d9BeginFrame,
-    d3d9EndFrame,
-    d3d9BeginView,
-    d3d9EndView,
-    d3d9DrawSprite,
-    d3d9DrawSpritePart,
-    d3d9DrawRectangle,
-    d3d9DrawLine,
-    d3d9DrawLineColor,
-    d3d9DrawText,
-    d3d9Flush,
-    d3d9CreateSpriteFromSurface,
-    d3d9DeleteSprite,
-    NULL, // drawTile — use default path
-};
+// GUI coordinates are independent of the last room view. The platform presents
+// after this pass, so these hooks must never end or present the D3D scene.
+static void d3d9EndFrameInit(Renderer* renderer) { flushBatch((D3D9Renderer*)renderer); }
+static void d3d9BeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH,
+                         int32_t portX, int32_t portY, int32_t portW, int32_t portH,
+                         int32_t targetSurfaceId) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    (void)targetSurfaceId; // User surfaces are not implemented by this backend yet.
+    flushBatch(dr);
+    dr->offsetX = dr->offsetY = 0.0f;
+    dr->portOffsetX = (float)portX;
+    dr->portOffsetY = (float)portY;
+    dr->portScaleX = guiW > 0 ? (float)portW / (float)guiW : 1.0f;
+    dr->portScaleY = guiH > 0 ? (float)portH / (float)guiH : 1.0f;
+}
+static void d3d9SetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
+                                 int32_t portW, int32_t portH, bool renderingToUserSurface) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    (void)renderingToUserSurface;
+    dr->offsetX = dr->offsetY = 0.0f;
+    dr->portScaleX = guiW > 0 ? (float)portW / (float)guiW : 1.0f;
+    dr->portScaleY = guiH > 0 ? (float)portH / (float)guiH : 1.0f;
+}
+static void d3d9EndGUI(Renderer* renderer) { flushBatch((D3D9Renderer*)renderer); }
+
+static void d3d9DrawSpritePos(Renderer* renderer, int32_t tpagIndex,
+                              float x1, float y1, float x2, float y2,
+                              float x3, float y3, float x4, float y4, float alpha) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    DataWin* dw = renderer->dataWin;
+    if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return;
+    TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
+    int32_t page = tpag->texturePageId;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) return;
+    ensureTexture(dr, page);
+    float tw = (float)dr->textureWidths[page], th = (float)dr->textureHeights[page];
+    if (tw <= 0.0f || th <= 0.0f) return;
+    float cr, cg, cb, ca;
+    bgrToFloatColor(0xFFFFFF, alpha, &cr, &cg, &cb, &ca);
+    SpriteVertex* v = allocQuad(dr);
+    float sx, sy;
+    transformPoint(dr, x1, y1, &sx, &sy);
+    setVertex(&v[0], sx, sy, (float)tpag->sourceX / tw, (float)tpag->sourceY / th, cr, cg, cb, ca);
+    transformPoint(dr, x2, y2, &sx, &sy);
+    setVertex(&v[1], sx, sy, (float)(tpag->sourceX + tpag->sourceWidth) / tw, (float)tpag->sourceY / th, cr, cg, cb, ca);
+    transformPoint(dr, x3, y3, &sx, &sy);
+    setVertex(&v[2], sx, sy, (float)(tpag->sourceX + tpag->sourceWidth) / tw, (float)(tpag->sourceY + tpag->sourceHeight) / th, cr, cg, cb, ca);
+    transformPoint(dr, x4, y4, &sx, &sy);
+    setVertex(&v[3], sx, sy, (float)tpag->sourceX / tw, (float)(tpag->sourceY + tpag->sourceHeight) / th, cr, cg, cb, ca);
+}
+static void d3d9DrawRectangleColor(Renderer* renderer, float x1, float y1, float x2, float y2,
+                                   uint32_t c1, uint32_t c2, uint32_t c3, uint32_t c4,
+                                   float alpha, bool outline) {
+    if (outline) {
+        d3d9DrawLineColor(renderer, x1, y1, x2, y1, 1.0f, c1, c2, alpha);
+        d3d9DrawLineColor(renderer, x2, y1, x2, y2, 1.0f, c2, c3, alpha);
+        d3d9DrawLineColor(renderer, x2, y2, x1, y2, 1.0f, c3, c4, alpha);
+        d3d9DrawLineColor(renderer, x1, y2, x1, y1, 1.0f, c4, c1, alpha);
+        return;
+    }
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    ensureTexture(dr, -1);
+    SpriteVertex* v = allocQuad(dr);
+    float x, y, r, g, b, a;
+    transformPoint(dr, x1, y1, &x, &y);
+    bgrToFloatColor(c1, alpha, &r, &g, &b, &a); setVertex(&v[0], x, y, 0, 0, r, g, b, a);
+    transformPoint(dr, x2, y1, &x, &y);
+    bgrToFloatColor(c2, alpha, &r, &g, &b, &a); setVertex(&v[1], x, y, 1, 0, r, g, b, a);
+    transformPoint(dr, x2, y2, &x, &y);
+    bgrToFloatColor(c3, alpha, &r, &g, &b, &a); setVertex(&v[2], x, y, 1, 1, r, g, b, a);
+    transformPoint(dr, x1, y2, &x, &y);
+    bgrToFloatColor(c4, alpha, &r, &g, &b, &a); setVertex(&v[3], x, y, 0, 1, r, g, b, a);
+}
+static void d3d9DrawTriangle(Renderer* renderer, float x1, float y1, float x2, float y2,
+                             float x3, float y3, uint32_t c1, uint32_t c2, uint32_t c3,
+                             float alpha, bool outline) {
+    if (outline) {
+        d3d9DrawLine(renderer, x1, y1, x2, y2, 1.0f, c1, alpha);
+        d3d9DrawLine(renderer, x2, y2, x3, y3, 1.0f, c2, alpha);
+        d3d9DrawLine(renderer, x3, y3, x1, y1, 1.0f, c3, alpha);
+        return;
+    }
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    flushBatch(dr);
+    IDirect3DDevice9* dev = Dev(dr);
+    dev->SetTexture(0, (IDirect3DBaseTexture9*)dr->whiteTexture);
+    SpriteVertex v[3];
+    float x, y, r, g, b, a;
+    transformPoint(dr, x1, y1, &x, &y); bgrToFloatColor(c1, alpha, &r, &g, &b, &a);
+    setVertex(&v[0], x, y, 0, 0, r, g, b, a);
+    transformPoint(dr, x2, y2, &x, &y); bgrToFloatColor(c2, alpha, &r, &g, &b, &a);
+    setVertex(&v[1], x, y, 0, 0, r, g, b, a);
+    transformPoint(dr, x3, y3, &x, &y); bgrToFloatColor(c3, alpha, &r, &g, &b, &a);
+    setVertex(&v[2], x, y, 0, 0, r, g, b, a);
+    dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, v, sizeof(SpriteVertex));
+    dr->currentTextureIndex = -1;
+}
+static void d3d9DrawTextModern(Renderer* renderer, const char* text, float x, float y,
+                               float xs, float ys, float angle, float lineSeparation) {
+    (void)lineSeparation;
+    d3d9DrawText(renderer, text, x, y, xs, ys, angle);
+}
+static void d3d9DrawTextColorModern(Renderer* renderer, const char* text, float x, float y,
+                                   float xs, float ys, float angle, int32_t c1, int32_t c2,
+                                   int32_t c3, int32_t c4, float alpha, float lineSeparation) {
+    (void)c2; (void)c3; (void)c4; (void)lineSeparation;
+    uint32_t oldColor = renderer->drawColor;
+    float oldAlpha = renderer->drawAlpha;
+    renderer->drawColor = (uint32_t)c1;
+    renderer->drawAlpha = alpha;
+    d3d9DrawText(renderer, text, x, y, xs, ys, angle);
+    renderer->drawColor = oldColor;
+    renderer->drawAlpha = oldAlpha;
+}
+static void d3d9DrawSpriteTiled(Renderer* renderer, int32_t tpagIndex, float originX, float originY,
+                                float x, float y, float xs, float ys, bool tileX, bool tileY,
+                                float roomW, float roomH, uint32_t color, float alpha) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    if (!renderer->dataWin || tpagIndex < 0 || (uint32_t)tpagIndex >= renderer->dataWin->tpag.count ||
+        xs == 0.0f || ys == 0.0f) return;
+    TexturePageItem* t = &renderer->dataWin->tpag.items[tpagIndex];
+    float stepX = (float)t->sourceWidth * (xs < 0 ? -xs : xs);
+    float stepY = (float)t->sourceHeight * (ys < 0 ? -ys : ys);
+    if (stepX <= 0.0f || stepY <= 0.0f) return;
+    int nx = tileX ? (int)(roomW / stepX) + 1 : 1;
+    int ny = tileY ? (int)(roomH / stepY) + 1 : 1;
+    if (nx > 128) nx = 128;
+    if (ny > 128) ny = 128;
+    for (int iy = 0; iy < ny; iy++) for (int ix = 0; ix < nx; ix++) {
+        float dx = x + (tileX ? ix * stepX : 0.0f);
+        float dy = y + (tileY ? iy * stepY : 0.0f);
+        d3d9DrawSpritePart(renderer, tpagIndex, 0, 0, (float)t->sourceWidth, (float)t->sourceHeight,
+                           dx, dy, xs, ys, 0.0f, originX, originY, color, alpha);
+    }
+    (void)dr;
+}
+static void d3d9DrawSurfaceTiled(Renderer* renderer, int32_t surfaceID, float x, float y,
+                                float xs, float ys, float roomW, float roomH, uint32_t color, float alpha) {
+    (void)renderer; (void)surfaceID; (void)x; (void)y; (void)xs; (void)ys;
+    (void)roomW; (void)roomH; (void)color; (void)alpha;
+}
+static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, int32_t st,
+                            int32_t sw, int32_t sh, float x, float y, float xs, float ys,
+                            float angle, uint32_t color, float alpha) {
+    (void)renderer; (void)surfaceID; (void)sl; (void)st; (void)sw; (void)sh;
+    (void)x; (void)y; (void)xs; (void)ys; (void)angle; (void)color; (void)alpha;
+}
+
+// Unsupported surface/shader operations fail explicitly instead of dispatching
+// through a mismatched function pointer. These are capability gaps, not success.
+static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h) { (void)r; (void)w; (void)h; return -1; }
+static bool d3d9SurfaceExists(Renderer* r, int32_t id) { (void)r; (void)id; return false; }
+static bool d3d9SetRenderTarget(Renderer* r, int32_t id, bool implicit) { (void)r; (void)id; (void)implicit; return false; }
+static int32_t d3d9EnsureApplicationSurface(Renderer* r, int32_t w, int32_t h) { (void)r; (void)w; (void)h; return -1; }
+static float d3d9GetSurfaceWidth(Renderer* r, int32_t id) { (void)r; (void)id; return 0.0f; }
+static float d3d9GetSurfaceHeight(Renderer* r, int32_t id) { (void)r; (void)id; return 0.0f; }
+static void d3d9SurfaceResize(Renderer* r, int32_t id, int32_t w, int32_t h) { (void)r; (void)id; (void)w; (void)h; }
+static void d3d9SurfaceFree(Renderer* r, int32_t id) { (void)r; (void)id; }
+static void d3d9SurfaceCopy(Renderer* r, int32_t d, int32_t dx, int32_t dy, int32_t src, int32_t sx, int32_t sy, int32_t w, int32_t h, bool part) {
+    (void)r; (void)d; (void)dx; (void)dy; (void)src; (void)sx; (void)sy; (void)w; (void)h; (void)part;
+}
+static bool d3d9SurfaceGetPixels(Renderer* r, int32_t id, uint8_t* rgba) { (void)r; (void)id; (void)rgba; return false; }
+static uint32_t d3d9SpriteGetTexture(Renderer* r, int32_t i) { (void)r; (void)i; return 0; }
+static uint32_t d3d9SurfaceGetTexture(Renderer* r, int32_t i) { (void)r; (void)i; return 0; }
+static float d3d9TextureGetTexelWidth(Renderer* r, uint32_t i) { (void)r; (void)i; return 0.0f; }
+static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t i) { (void)r; (void)i; return 0.0f; }
+static bool d3d9TextureGetUVs(Renderer* r, uint32_t i, float* uv) { (void)r; (void)i; (void)uv; return false; }
+static void d3d9TextureSetStage(Renderer* r, int32_t slot, uint32_t id) { (void)r; (void)slot; (void)id; }
+static void d3d9GpuSetShader(Renderer* r, int32_t i) { (void)r; (void)i; }
+static void d3d9GpuResetShader(Renderer* r) { (void)r; }
+static int32_t d3d9ShaderGetUniform(Renderer* r, int32_t s, char* n) { (void)r; (void)s; (void)n; return -1; }
+static int32_t d3d9ShaderGetSamplerIndex(Renderer* r, int32_t s, char* n) { (void)r; (void)s; (void)n; return -1; }
+static void d3d9ShaderSetUniformF(Renderer* r, int32_t h, int32_t c, float a, float b, float d, float e) { (void)r; (void)h; (void)c; (void)a; (void)b; (void)d; (void)e; }
+static void d3d9ShaderSetUniformI(Renderer* r, int32_t h, int32_t c, int32_t a, int32_t b, int32_t d, int32_t e) { (void)r; (void)h; (void)c; (void)a; (void)b; (void)d; (void)e; }
+static bool d3d9ShaderIsCompiled(Renderer* r, int32_t i) { (void)r; (void)i; return false; }
+static bool d3d9ShadersSupported(void) { return false; }
+
+static void d3d9GpuSetBlendEnable(Renderer* r, bool enable) {
+    Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_ALPHABLENDENABLE, enable ? TRUE : FALSE);
+}
+static bool d3d9GpuGetBlendEnable(Renderer* r) {
+    DWORD value = FALSE;
+    Dev((D3D9Renderer*)r)->GetRenderState(D3DRS_ALPHABLENDENABLE, &value);
+    return value != FALSE;
+}
+static void d3d9GpuSetTexFilter(Renderer* r, bool enable) {
+    IDirect3DDevice9* d = Dev((D3D9Renderer*)r);
+    DWORD f = enable ? D3DTEXF_LINEAR : D3DTEXF_POINT;
+    d->SetSamplerState(0, D3DSAMP_MINFILTER, f);
+    d->SetSamplerState(0, D3DSAMP_MAGFILTER, f);
+}
+static void d3d9GpuSetAlphaTestEnable(Renderer* r, bool enable) {
+    Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_ALPHATESTENABLE, enable ? TRUE : FALSE);
+}
+static void d3d9GpuSetAlphaTestRef(Renderer* r, uint8_t ref) {
+    Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_ALPHAREF, ref);
+}
+static void d3d9GpuSetColorWriteEnable(Renderer* r, bool red, bool green, bool blue, bool alpha) {
+    DWORD mask = (red ? D3DCOLORWRITEENABLE_RED : 0) |
+                 (green ? D3DCOLORWRITEENABLE_GREEN : 0) |
+                 (blue ? D3DCOLORWRITEENABLE_BLUE : 0) |
+                 (alpha ? D3DCOLORWRITEENABLE_ALPHA : 0);
+    Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_COLORWRITEENABLE, mask);
+}
+static void d3d9GpuGetColorWriteEnable(Renderer* r, bool* red, bool* green, bool* blue, bool* alpha) {
+    DWORD mask = 0;
+    Dev((D3D9Renderer*)r)->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
+    if (red) *red = (mask & D3DCOLORWRITEENABLE_RED) != 0;
+    if (green) *green = (mask & D3DCOLORWRITEENABLE_GREEN) != 0;
+    if (blue) *blue = (mask & D3DCOLORWRITEENABLE_BLUE) != 0;
+    if (alpha) *alpha = (mask & D3DCOLORWRITEENABLE_ALPHA) != 0;
+}
+static void d3d9GpuSetBlendMode(Renderer* r, int32_t mode) {
+    IDirect3DDevice9* d = Dev((D3D9Renderer*)r);
+    DWORD src = D3DBLEND_SRCALPHA, dst = D3DBLEND_INVSRCALPHA;
+    if (mode == bm_add) dst = D3DBLEND_ONE;
+    else if (mode == bm_subtract) { src = D3DBLEND_ZERO; dst = D3DBLEND_INVSRCCOLOR; }
+    d->SetRenderState(D3DRS_SRCBLEND, src);
+    d->SetRenderState(D3DRS_DESTBLEND, dst);
+}
+static void d3d9GpuSetBlendModeExt(Renderer* r, int32_t sf, int32_t df, int32_t sfa, int32_t dfa) {
+    (void)sfa; (void)dfa;
+    DWORD src = D3DBLEND_SRCALPHA, dst = D3DBLEND_INVSRCALPHA;
+    switch (sf) {
+        case bm_zero: src = D3DBLEND_ZERO; break; case bm_one: src = D3DBLEND_ONE; break;
+        case bm_src_color: src = D3DBLEND_SRCCOLOR; break; case bm_inv_src_color: src = D3DBLEND_INVSRCCOLOR; break;
+        case bm_src_alpha: src = D3DBLEND_SRCALPHA; break; case bm_inv_src_alpha: src = D3DBLEND_INVSRCALPHA; break;
+        case bm_dest_alpha: src = D3DBLEND_DESTALPHA; break; case bm_inv_dest_alpha: src = D3DBLEND_INVDESTALPHA; break;
+        case bm_dest_color: src = D3DBLEND_DESTCOLOR; break; case bm_inv_dest_color: src = D3DBLEND_INVDESTCOLOR; break;
+        case bm_src_alpha_sat: src = D3DBLEND_SRCALPHASAT; break;
+    }
+    switch (df) {
+        case bm_zero: dst = D3DBLEND_ZERO; break; case bm_one: dst = D3DBLEND_ONE; break;
+        case bm_src_color: dst = D3DBLEND_SRCCOLOR; break; case bm_inv_src_color: dst = D3DBLEND_INVSRCCOLOR; break;
+        case bm_src_alpha: dst = D3DBLEND_SRCALPHA; break; case bm_inv_src_alpha: dst = D3DBLEND_INVSRCALPHA; break;
+        case bm_dest_alpha: dst = D3DBLEND_DESTALPHA; break; case bm_inv_dest_alpha: dst = D3DBLEND_INVDESTALPHA; break;
+        case bm_dest_color: dst = D3DBLEND_DESTCOLOR; break; case bm_inv_dest_color: dst = D3DBLEND_INVDESTCOLOR; break;
+        case bm_src_alpha_sat: dst = D3DBLEND_SRCALPHASAT; break;
+    }
+    IDirect3DDevice9* d = Dev((D3D9Renderer*)r);
+    d->SetRenderState(D3DRS_SRCBLEND, src);
+    d->SetRenderState(D3DRS_DESTBLEND, dst);
+}
+static void d3d9ClearScreen(Renderer* r, uint32_t color, float alpha) {
+    float cr, cg, cb, ca;
+    bgrToFloatColor(color, alpha, &cr, &cg, &cb, &ca);
+    DWORD packed = D3DCOLOR_ARGB((DWORD)(ca * 255.0f), (DWORD)(cr * 255.0f),
+                                  (DWORD)(cg * 255.0f), (DWORD)(cb * 255.0f));
+    Dev((D3D9Renderer*)r)->Clear(0, NULL, D3DCLEAR_TARGET, packed, 1.0f, 0);
+}
+
+// Populate by field name. The modern contract has grown substantially; a
+// positional initializer silently routes incompatible callbacks into slots.
+static RendererVtable d3d9RendererVtable;
+static bool d3d9RendererVtableInitialized = false;
+static void d3d9InitializeRendererVtable(void) {
+    if (d3d9RendererVtableInitialized) return;
+    memset(&d3d9RendererVtable, 0, sizeof(d3d9RendererVtable));
+    d3d9RendererVtable.init = d3d9Init;
+    d3d9RendererVtable.destroy = d3d9Destroy;
+    d3d9RendererVtable.beginFrame = d3d9BeginFrame;
+    d3d9RendererVtable.endFrameInit = d3d9EndFrameInit;
+    d3d9RendererVtable.endFrameEnd = d3d9EndFrame;
+    d3d9RendererVtable.beginView = d3d9BeginView;
+    d3d9RendererVtable.endView = d3d9EndView;
+    d3d9RendererVtable.beginGUI = d3d9BeginGUI;
+    d3d9RendererVtable.setGuiProjection = d3d9SetGuiProjection;
+    d3d9RendererVtable.endGUI = d3d9EndGUI;
+    d3d9RendererVtable.drawSprite = d3d9DrawSprite;
+    d3d9RendererVtable.drawSpritePart = d3d9DrawSpritePart;
+    d3d9RendererVtable.drawSpritePos = d3d9DrawSpritePos;
+    d3d9RendererVtable.drawRectangle = d3d9DrawRectangle;
+    d3d9RendererVtable.drawRectangleColor = d3d9DrawRectangleColor;
+    d3d9RendererVtable.drawLine = d3d9DrawLine;
+    d3d9RendererVtable.drawTriangle = d3d9DrawTriangle;
+    d3d9RendererVtable.drawLineColor = d3d9DrawLineColor;
+    d3d9RendererVtable.drawText = d3d9DrawTextModern;
+    d3d9RendererVtable.drawTextColor = d3d9DrawTextColorModern;
+    d3d9RendererVtable.drawSpriteTiled = d3d9DrawSpriteTiled;
+    d3d9RendererVtable.drawSurfaceTiled = d3d9DrawSurfaceTiled;
+    d3d9RendererVtable.flush = d3d9Flush;
+    d3d9RendererVtable.clearScreen = d3d9ClearScreen;
+    d3d9RendererVtable.createSpriteFromSurface = d3d9CreateSpriteFromSurface;
+    d3d9RendererVtable.deleteSprite = d3d9DeleteSprite;
+    d3d9RendererVtable.gpuSetBlendMode = d3d9GpuSetBlendMode;
+    d3d9RendererVtable.gpuSetBlendModeExt = d3d9GpuSetBlendModeExt;
+    d3d9RendererVtable.gpuSetBlendEnable = d3d9GpuSetBlendEnable;
+    d3d9RendererVtable.gpuSetTexFilter = d3d9GpuSetTexFilter;
+    d3d9RendererVtable.gpuGetBlendEnable = d3d9GpuGetBlendEnable;
+    d3d9RendererVtable.gpuSetAlphaTestEnable = d3d9GpuSetAlphaTestEnable;
+    d3d9RendererVtable.gpuSetAlphaTestRef = d3d9GpuSetAlphaTestRef;
+    d3d9RendererVtable.gpuSetColorWriteEnable = d3d9GpuSetColorWriteEnable;
+    d3d9RendererVtable.gpuGetColorWriteEnable = d3d9GpuGetColorWriteEnable;
+    d3d9RendererVtable.createSurface = d3d9CreateSurface;
+    d3d9RendererVtable.surfaceExists = d3d9SurfaceExists;
+    d3d9RendererVtable.setRenderTarget = d3d9SetRenderTarget;
+    d3d9RendererVtable.ensureApplicationSurface = d3d9EnsureApplicationSurface;
+    d3d9RendererVtable.getSurfaceWidth = d3d9GetSurfaceWidth;
+    d3d9RendererVtable.getSurfaceHeight = d3d9GetSurfaceHeight;
+    d3d9RendererVtable.drawSurface = d3d9DrawSurface;
+    d3d9RendererVtable.surfaceResize = d3d9SurfaceResize;
+    d3d9RendererVtable.surfaceFree = d3d9SurfaceFree;
+    d3d9RendererVtable.surfaceCopy = d3d9SurfaceCopy;
+    d3d9RendererVtable.surfaceGetPixels = d3d9SurfaceGetPixels;
+    d3d9RendererVtable.spriteGetTexture = d3d9SpriteGetTexture;
+    d3d9RendererVtable.surfaceGetTexture = d3d9SurfaceGetTexture;
+    d3d9RendererVtable.textureGetTexelWidth = d3d9TextureGetTexelWidth;
+    d3d9RendererVtable.textureGetTexelHeight = d3d9TextureGetTexelHeight;
+    d3d9RendererVtable.textureGetUVs = d3d9TextureGetUVs;
+    d3d9RendererVtable.textureSetStage = d3d9TextureSetStage;
+    d3d9RendererVtable.gpuSetShader = d3d9GpuSetShader;
+    d3d9RendererVtable.gpuResetShader = d3d9GpuResetShader;
+    d3d9RendererVtable.shaderGetUniform = d3d9ShaderGetUniform;
+    d3d9RendererVtable.shaderGetSamplerIndex = d3d9ShaderGetSamplerIndex;
+    d3d9RendererVtable.shaderSetUniformF = d3d9ShaderSetUniformF;
+    d3d9RendererVtable.shaderSetUniformI = d3d9ShaderSetUniformI;
+    d3d9RendererVtable.shaderIsCompiled = d3d9ShaderIsCompiled;
+    d3d9RendererVtable.shadersSupported = d3d9ShadersSupported;
+    d3d9RendererVtableInitialized = true;
+}
 
 // ===[ Public API ]===
 
 Renderer* D3D9Renderer_create(void* pd3dDevice) {
+    if (!pd3dDevice) return NULL;
     D3D9Renderer* dr = (D3D9Renderer*)calloc(1, sizeof(D3D9Renderer));
+    if (!dr) return NULL;
+    d3d9InitializeRendererVtable();
     dr->base.vtable = &d3d9RendererVtable;
     dr->base.drawColor = 0xFFFFFF;
     dr->base.drawAlpha = 1.0f;
