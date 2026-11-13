@@ -67,6 +67,22 @@ static void setupDefaultMappings(void) {
     memcpy(xpadMappings, defaults, sizeof(defaults));
 }
 
+// Mirrors the modern platformSwapBuffers() hook: finish the D3D scene only
+// after the GUI pass has been drawn, then present the completed back buffer.
+static void platformSwapBuffers(IDirect3DDevice9* device) {
+    if (!device) return;
+
+    HRESULT hr = device->EndScene();
+    if (FAILED(hr)) {
+        DbgPrint("BS: EndScene failed: 0x%08X\\n", (unsigned)hr);
+    }
+
+    hr = device->Present(NULL, NULL, NULL, NULL);
+    if (FAILED(hr)) {
+        DbgPrint("BS: Present failed: 0x%08X\\n", (unsigned)hr);
+    }
+}
+
 // ===[ Main Entry Point ]===
 
 VOID __cdecl main() {
@@ -243,11 +259,6 @@ VOID __cdecl main() {
     int32_t gameH = (int32_t)gen8->defaultWindowHeight;
     DbgPrint("BS: gameW=%d gameH=%d screenW=%d screenH=%d\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    Gen8* gen8 = &dataWin->gen8;
-    int32_t gameW = (int32_t)gen8->defaultWindowWidth;
-    int32_t gameH = (int32_t)gen8->defaultWindowHeight;
-    DbgPrint("BS: gameW=%d gameH=%d screenW=%d screenH=%d\\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
-
     DbgPrint("BS: entering modern main loop\\n");
 
     LARGE_INTEGER freq, lastTime, currentTime;
@@ -326,6 +337,7 @@ VOID __cdecl main() {
             Runner_drawPost(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
             renderer->vtable->endFrameEnd(renderer);
             Runner_drawGUI(runner, SCREEN_WIDTH, SCREEN_HEIGHT, gameW, gameH);
+            platformSwapBuffers(pd3dDevice);
 
             Runner_handlePendingRoomChange(runner);
             RunnerKeyboard_beginFrame(runner->keyboard);
