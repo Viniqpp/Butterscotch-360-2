@@ -126,6 +126,8 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     renderer->dataWin = dataWin;
     dr->initialized = false;
     if (!dev || !dataWin) return;
+    dr->gameW = (int32_t)dataWin->gen8.defaultWindowWidth;
+    dr->gameH = (int32_t)dataWin->gen8.defaultWindowHeight;
 
     // Allocate CPU vertex staging buffer
     dr->vertexData = (uint8_t*)malloc(D3D9_MAX_QUADS * D3D9_VERTS_PER_QUAD * sizeof(SpriteVertex));
@@ -381,6 +383,7 @@ static void d3d9BeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int3
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     IDirect3DDevice9* dev = Dev(dr);
     (void)viewAngle; // TODO: support rotated views
+    if (!dr->initialized || !dev || viewW <= 0 || viewH <= 0) return;
 
     D3DVIEWPORT9 vp;
     vp.X = 0;
