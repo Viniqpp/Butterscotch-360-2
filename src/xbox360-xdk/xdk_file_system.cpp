@@ -221,7 +221,8 @@ static void xdkBinaryClose(FileSystem* fs, void* handle) {
 
 static int32_t xdkBinaryRead(FileSystem* fs, void* handle, void* dst, int32_t count) {
     (void)fs;
-    if (!handle || !dst || count < 0) return -1;
+    if (!handle || count < 0 || (count > 0 && !dst)) return -1;
+    if (count == 0) return 0;
     DWORD received = 0;
     if (!ReadFile((HANDLE)handle, dst, (DWORD)count, &received, NULL)) return -1;
     return (int32_t)received;
@@ -230,6 +231,7 @@ static int32_t xdkBinaryRead(FileSystem* fs, void* handle, void* dst, int32_t co
 static int32_t xdkBinaryWrite(FileSystem* fs, void* handle, const void* src, int32_t count) {
     (void)fs;
     if (!handle || (count > 0 && !src) || count < 0) return -1;
+    if (count == 0) return 0;
     DWORD written = 0;
     if (!WriteFile((HANDLE)handle, src, (DWORD)count, &written, NULL)) return -1;
     return (int32_t)written;
