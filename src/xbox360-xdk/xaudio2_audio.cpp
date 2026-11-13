@@ -151,7 +151,7 @@ static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
             (uint32_t)inst->soundIndex < xa->base.dw->sond.count) {
             groupGain = AudioSystem_soundGroupGain(audio, inst->soundIndex);
         }
-        HRESULT hr = inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain * groupGain);
+        HRESULT hr = inst->pVoice->SetVolume(inst->currentGain * xa->masterGain * groupGain);
         if (FAILED(hr)) DbgPrint("BS: SetVolume update failed: hr=0x%08X\n", (unsigned)hr);
     }
 }
@@ -349,9 +349,13 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     inst->loop = loop;
     inst->pitch = initialPitch;
     inst->sondPitch = initialPitch;
-    inst->currentGain = 1.0f;
-    inst->targetGain = 1.0f;
-    inst->sondVolume = initialGain;
+    // currentGain is the effective base gain for both SOND sounds and streams;
+    // later audio_sound_gain calls replace it rather than multiplying the
+    // original SOND/stream gain a second time.
+    inst->currentGain = initialGain;
+    inst->targetGain = initialGain;
+    inst->startGain = initialGain;
+    inst->sondVolume = 1.0f;
 
     inst->instanceId = allocateInstanceId(xa);
     if (inst->instanceId < 0) {
@@ -673,7 +677,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         return -1;
     }
     float groupGain = !isStream ? AudioSystem_soundGroupGain(audio, soundIndex) : 1.0f;
-    hr = inst->pVoice->SetVolume(inst->currentGain * inst->sondVolume * xa->masterGain * groupGain);
+    hr = inst->pVoice->SetVolume(inst->currentGain * xa->masterGain * groupGain);
     if (FAILED(hr)) {
         DbgPrint("BS: SetVolume failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
