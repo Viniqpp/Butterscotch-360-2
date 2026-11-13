@@ -11,6 +11,16 @@ static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     XdkFileSystem* xfs = (XdkFileSystem*)fs;
     if (!xfs || !relativePath) return NULL;
 
+    // Reject parent-directory components so game paths cannot escape the
+    // selected content root. Check both slash styles before normalizing.
+    const char* component = relativePath;
+    while (*component) {
+        while (*component == '/' || *component == '\\') ++component;
+        const char* start = component;
+        while (*component && *component != '/' && *component != '\\') ++component;
+        if (component - start == 2 && start[0] == '.' && start[1] == '.') return NULL;
+    }
+
     // Only an actual drive-qualified path or a rooted path bypasses data.win's
     // directory. A colon in an ordinary filename is not an absolute-path marker.
     const char* colon = strchr(relativePath, ':');
