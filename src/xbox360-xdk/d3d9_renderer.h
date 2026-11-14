@@ -94,3 +94,6 @@ typedef struct {
 } D3D9Renderer;
 
 Renderer* D3D9Renderer_create(void* pd3dDevice);
+
+// Folder holding the precompiled <name>.xps shaders: "shaders\" next to data.win.
+extern char g_d3d9ShaderDir[256];

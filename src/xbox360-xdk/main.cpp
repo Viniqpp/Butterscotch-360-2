@@ -59,6 +59,35 @@ void platformLog(const logType type, const char* format, va_list va) {
     xdkWriteLog(line);
 }
 
+// game_change(working_directory, "-game <path>") -> g_nextGame, a game:\ path.
+// Segments are normalised so ".." never climbs above game:\ (where the launcher sits).
+static char g_nextGame[256];
+static void xdkPrepareGameChange(Runner* runner) {
+    const char* params = runner->pendingLaunchParameters;
+    const char* wd = runner->pendingWorkingDirectory ? runner->pendingWorkingDirectory : "";
+    const char* rel = strstr(params, "-game");
+    rel = rel ? rel + 5 : params;
+    while (*rel == ' ' || *rel == '"') rel++;
+    char joined[512];
+    // An absolute host path (C:\...) means nothing on the console: keep only the relative part.
+    snprintf(joined, sizeof(joined), "%s\\%s", strchr(wd, ':') ? "" : wd, rel);
+    char* quote = strchr(joined, '"');
+    if (quote) *quote = '\0';
+    strcpy(g_nextGame, "game:");
+    for (char* seg = strtok(joined, "\\/"); seg; seg = strtok(NULL, "\\/")) {
+        if (!strcmp(seg, ".") || !seg[0]) continue;
+        if (!strcmp(seg, "..")) {
+            char* last = strrchr(g_nextGame, '\\');
+            if (last) *last = '\0';
+            continue;
+        }
+        if (strlen(g_nextGame) + strlen(seg) + 2 >= sizeof(g_nextGame)) break;
+        strcat(g_nextGame, "\\");
+        strcat(g_nextGame, seg);
+    }
+    xdkLog("BS: game_change(\"%s\", \"%s\") -> %s\n", wd, params, g_nextGame);
+}
+
 // ===[ POSIX clock polyfill implementation ]===
 double _xdk_monotonic_ms(void) {
     LARGE_INTEGER freq, counter;
@@ -276,9 +305,24 @@ VOID __cdecl main() {
         NULL,
     };
 
+    // A game_change (e.g. Deltarune's chapter select) relaunches this XEX with
+    // the next data.win in the launch data; otherwise search the usual places.
+    static char launchPath[256];
+    DWORD launchSize = 0;
+    if (XGetLaunchDataSize(&launchSize) == ERROR_SUCCESS && launchSize > 0 && launchSize <= sizeof(launchPath) &&
+        XGetLaunchData(launchPath, sizeof(launchPath)) == ERROR_SUCCESS) {
+        launchPath[sizeof(launchPath) - 1] = '\0';
+        FILE* testFile = fopen(launchPath, "rb");
+        if (testFile) {
+            fclose(testFile);
+            dataWinPath = launchPath;
+            xdkLog("BS: game_change target %s\n", dataWinPath);
+        }
+    }
+
     xdkLog("BS: searching for data.win\n");
     char msg[256];
-    for (int i = 0; searchPaths[i]; i++) {
+    for (int i = 0; !dataWinPath && searchPaths[i]; i++) {
         xdkLog("BS: trying %s\n", searchPaths[i]);
 
         FILE* testFile = fopen(searchPaths[i], "rb");
@@ -294,6 +338,14 @@ VOID __cdecl main() {
         xdkLog("BS: FATAL: data.win not found\n");
         shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
+    }
+    { // Each data.win (e.g. every Deltarune chapter) has its own shaders\ folder.
+        const char* slash = strrchr(dataWinPath, '\\');
+        size_t dirLen = slash ? (size_t)(slash - dataWinPath + 1) : 0;
+        if (dirLen + 9 < sizeof(g_d3d9ShaderDir)) {
+            memcpy(g_d3d9ShaderDir, dataWinPath, dirLen);
+            strcpy(g_d3d9ShaderDir + dirLen, "shaders\\");
+        }
     }
 
     { MEMORYSTATUS m0; GlobalMemoryStatus(&m0); xdkLog("BS: parsing data.win (free=%uMB)\n", (unsigned)(m0.dwAvailPhys >> 20)); }
@@ -475,6 +527,10 @@ VOID __cdecl main() {
     int perfFrames = 0, perfSteps = 0;
 
     while (!runner->shouldExit) {
+        if (runner->pendingLaunchParameters) { // game_change: restart as a fresh process, like GameMaker
+            xdkPrepareGameChange(runner);
+            break;
+        }
         if (!QueryPerformanceCounter(&currentTime)) {
             xdkLog("BS: performance counter query failed; stopping main loop\n");
             break;
@@ -598,4 +654,8 @@ VOID __cdecl main() {
     // ===[ Cleanup ]===
     xdkLog("BS: shutting down runner\n");
     shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
+    if (g_nextGame[0]) { // relaunch ourselves for the next data.win; does not return on success
+        XSetLaunchData(g_nextGame, (DWORD)strlen(g_nextGame) + 1);
+        XLaunchNewImage("game:\\default.xex", 0);
+    }
 }

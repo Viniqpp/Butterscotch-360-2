@@ -110,14 +110,18 @@ if ($Package) {
         # Audio groups, external music and options live next to data.win; games such
         # as Deltarune wait forever in their first room if an audio group is missing.
         $gameDir = Split-Path (Resolve-Path $DataWin)
-        Get-ChildItem $gameDir -Recurse -File | Where-Object { $_.Extension -in '.dat', '.ogg', '.ini' } | ForEach-Object {
+        # Sub-folders come along too, so passing Deltarune's launcher data.win stages
+        # every chapter (chapterN_windows\data.win) for its chapter select.
+        Get-ChildItem $gameDir -Recurse -File | Where-Object { $_.Extension -in '.win', '.dat', '.ogg', '.ini' } | ForEach-Object {
             $rel = $_.FullName.Substring($gameDir.Length + 1)
             New-Item -ItemType Directory -Force (Split-Path "$dist\$rel") | Out-Null
             Copy-Item $_.FullName "$dist\$rel" -Force
+            # Game shaders: GLSL ES -> HLSL -> Xenon microcode, in shaders\ next to each data.win.
+            if ($_.Name -eq 'data.win') {
+                & python "$repo\tools\xdk\translate_shaders.py" $_.FullName (Join-Path (Split-Path "$dist\$rel") 'shaders') --fxc "$XdkDir\bin\win32\fxc.exe"
+                if ($LASTEXITCODE -ne 0) { Write-Host "Some shaders in $rel failed to translate; those effects use the default shader." -ForegroundColor Yellow }
+            }
         }
-        # Game shaders: GLSL ES -> HLSL -> Xenon microcode, loaded from game:\shaders.
-        & python "$repo\tools\xdk\translate_shaders.py" $DataWin "$dist\shaders" --fxc "$XdkDir\bin\win32\fxc.exe"
-        if ($LASTEXITCODE -ne 0) { Write-Host "Some shaders failed to translate; those effects fall back to the default shader." -ForegroundColor Yellow }
     }
     Write-Host "Staged for FTP: $dist"
 }

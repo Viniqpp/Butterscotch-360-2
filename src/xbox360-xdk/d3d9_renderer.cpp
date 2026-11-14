@@ -1852,6 +1852,7 @@ static void d3d9TextureSetStage(Renderer* r, int32_t slot, uint32_t texID) {
 // Pixel shaders only: the fixed vertex shader already provides v_vTexcoord and
 // v_vColour. Uniform handles index uniformHandles (shader + D3DX constant).
 typedef struct { int32_t shader; D3DXHANDLE handle; } D3D9UniformRef;
+char g_d3d9ShaderDir[256] = "game:\\shaders\\";
 
 static void d3d9LoadUserShaders(D3D9Renderer* dr, DataWin* dw) {
     dr->userShaderCount = dw->shdr.count;
@@ -1863,7 +1864,7 @@ static void d3d9LoadUserShaders(D3D9Renderer* dr, DataWin* dw) {
     for (uint32_t i = 0; i < dr->userShaderCount; i++) {
         const char* name = dw->shdr.shaders[i].name;
         char path[256];
-        if (!name || snprintf(path, sizeof(path), "game:\\shaders\\%s.xps", name) >= (int)sizeof(path)) continue;
+        if (!name || snprintf(path, sizeof(path), "%s%s.xps", g_d3d9ShaderDir, name) >= (int)sizeof(path)) continue;
         FILE* f = fopen(path, "rb");
         if (!f) continue;
         fseek(f, 0, SEEK_END);
