@@ -45,13 +45,13 @@ Refresh2 is more than a build-system update: it replaces the old runner core wit
 - **Audio:** implements all 31 modern audio-vtable entries. This does not mean every audio feature is complete: unsupported operations may return safe failure/no-op results, and playback still needs game-by-game verification.
 - **Filesystem:** implements all 20 modern filesystem-vtable entries, including binary access, streaming handles and directory operations.
 - **Runtime and input:** uses the modern runner lifecycle and publishes native Xbox controller state to the modern gamepad API.
-- **Diagnostics:** writes `game:\\butterscotch.log` and periodically reports simulation, rendering and presentation timings.
+- **Diagnostics:** writes `game:\butterscotch.log` and periodically reports simulation, rendering and presentation timings.
 
 ### Hardware test notes
 
 The initial Undertale test on the current development build appeared to run well, but only a limited portion of the game has been exercised. Treat this as an encouraging smoke test, not a compatibility certification.
 
-The current Deltarune Chapter 1 test successfully parsed `data.win`, initialized the VM, renderer and audio system, loaded the initial room, changed rooms and continued entering the main loop. The captured log also reports a missing external file, `game:\\mus\\AUDIO_DRONE.ogg`. This is a confirmed missing asset for that test setup, but it does not by itself explain the black screen or prove that it is the only missing audio file. The renderer's known surface and shader gaps are plausible causes of missing visuals and require targeted tracing.
+The current Deltarune Chapter 1 test successfully parsed `data.win`, initialized the VM, renderer and audio system, loaded the initial room, changed rooms and continued entering the main loop. The captured log also reports a missing external file, `game:\mus\AUDIO_DRONE.ogg`. This is a confirmed missing asset for that test setup, but it does not by itself explain the black screen or prove that it is the only missing audio file. The renderer's known surface and shader gaps are plausible causes of missing visuals and require targeted tracing.
 
 The original port's known issues are therefore **regression targets**, not bugs that should be marked fixed based only on source changes. Compatibility claims should be updated only after the relevant game section or feature has been tested on the console.
 
