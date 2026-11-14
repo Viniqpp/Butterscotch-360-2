@@ -107,6 +107,14 @@ if ($Package) {
     Copy-Item $xex.FullName "$dist\default.xex" -Force   # Aurora launches default.xex
     if ($DataWin) {
         Copy-Item $DataWin "$dist\data.win" -Force
+        # Audio groups, external music and options live next to data.win; games such
+        # as Deltarune wait forever in their first room if an audio group is missing.
+        $gameDir = Split-Path (Resolve-Path $DataWin)
+        Get-ChildItem $gameDir -Recurse -File | Where-Object { $_.Extension -in '.dat', '.ogg', '.ini' } | ForEach-Object {
+            $rel = $_.FullName.Substring($gameDir.Length + 1)
+            New-Item -ItemType Directory -Force (Split-Path "$dist\$rel") | Out-Null
+            Copy-Item $_.FullName "$dist\$rel" -Force
+        }
         # Game shaders: GLSL ES -> HLSL -> Xenon microcode, loaded from game:\shaders.
         & python "$repo\tools\xdk\translate_shaders.py" $DataWin "$dist\shaders" --fxc "$XdkDir\bin\win32\fxc.exe"
         if ($LASTEXITCODE -ne 0) { Write-Host "Some shaders failed to translate; those effects fall back to the default shader." -ForegroundColor Yellow }

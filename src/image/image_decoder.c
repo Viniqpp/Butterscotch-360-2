@@ -26,7 +26,7 @@
 #define QOI_HEADER_SIZE 12
 #define COMPRESSED_QOI_HEADER_SIZE_OLD 8
 #define COMPRESSED_QOI_HEADER_SIZE_NEW 12
-#if (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#ifdef IS_BIG_ENDIAN // common.h: also covers MSVC targets like the Xbox 360 (_XBOX), which lack __BYTE_ORDER__
     #define PACK_RGBA(r, g, b, a) (((uint32_t)(r) << 24) | ((uint32_t)(g) << 16) | ((uint32_t)(b) << 8) | (uint32_t)(a))
     #define UNPACK_R(color) (((color) >> 24) & 0xFF)
     #define UNPACK_G(color) (((color) >> 16) & 0xFF)

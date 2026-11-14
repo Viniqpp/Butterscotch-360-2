@@ -15,6 +15,7 @@
 #include "runner.h"
 #include "vm_builtins.h"
 #include "stb_ds.h"
+#include "image_decoder.h"
 
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -115,6 +116,8 @@ static void ensureTexture(D3D9Renderer* dr, int32_t textureIndex) {
 }
 
 // Public texture handles are TPAG handles (index + 1), not raw TXTR page IDs.
+static void* d3d9Page(D3D9Renderer* dr, int32_t page);
+
 static int32_t d3d9TextureHandleToPage(D3D9Renderer* dr, uint32_t textureHandle) {
     if (!dr || !dr->base.dataWin || textureHandle == 0) return -1;
     DataWin* dw = dr->base.dataWin;
@@ -122,7 +125,7 @@ static int32_t d3d9TextureHandleToPage(D3D9Renderer* dr, uint32_t textureHandle)
     if (tpagIndex >= dw->tpag.count) return -1;
     int32_t page = dw->tpag.items[tpagIndex].texturePageId;
     if (page < 0 || (uint32_t)page >= dr->textureCount ||
-        !dr->textures || !dr->textures[page]) return -1;
+        !d3d9Page(dr, page)) return -1;
     return page;
 }
 
@@ -249,6 +252,117 @@ static void d3d9ApplyGuiCamera(D3D9Renderer* dr, int32_t guiW, int32_t guiH) {
 
 // ===[ Vtable Implementations ]===
 
+// Frees least-recently-used pages not drawn this frame until `bytes` fit.
+static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes) {
+    bool idled = false;
+    while (dr->textureBytesAllocated + bytes > dr->maxTextureBytes) {
+        int32_t victim = -1;
+        for (uint32_t p = 0; p < dr->textureCount; p++)
+            if (dr->textures[p] && dr->pageLastUse[p] != dr->frameCounter &&
+                (victim < 0 || dr->pageLastUse[p] < dr->pageLastUse[victim])) victim = (int32_t)p;
+        if (victim < 0) return false;
+        if (!idled) { // Xenon does not track resource lifetime: let the GPU finish first
+            flushBatch(dr);
+            Dev(dr)->BlockUntilIdle();
+            idled = true;
+        }
+        ((IDirect3DTexture9*)dr->textures[victim])->Release();
+        dr->textures[victim] = NULL;
+        dr->textureBytesAllocated -= dr->pageBytes[victim];
+        dr->pageBytes[victim] = 0;
+    }
+    return true;
+}
+
+// Decodes and uploads one TXTR page (PNG, QOI or BZip2+QOI).
+static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
+    IDirect3DDevice9* dev = Dev(dr);
+        Texture* txtr = &dr->base.dataWin->txtr.textures[i];
+        if (!txtr->blobData || txtr->blobSize == 0 || txtr->blobSize > 32u * 1024u * 1024u) {
+            logInfo("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
+            return false;
+        }
+        // PNG, GameMaker QOI or BZip2+QOI (2022+ titles such as Deltarune chapters 2-5).
+        int w = 0, h = 0;
+        uint8_t* pixels = ImageDecoder_decodeToRgba(txtr->blobData, txtr->blobSize,
+            DataWin_isVersionAtLeast(dr->base.dataWin, 2022, 5, 0, 0), &w, &h);
+        if (!pixels) {
+            logWarn("BS: could not decode TXTR page %u\n", i);
+            return false;
+        }
+        if (w <= 0 || h <= 0 || w > 8192 || h > 8192) {
+            logInfo("BS: invalid TXTR dimensions for page %u (%d x %d)\n", i, w, h);
+            free(pixels);
+            return false;
+        }
+
+        dr->textureWidths[i] = w;
+        dr->textureHeights[i] = h;
+
+        // Xbox 360 textures are uploaded through a linear surface. Keep a
+        // strict aggregate budget so malformed WADs cannot exhaust unified RAM.
+        if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h * 4u)) { free(pixels); return false; }
+        IDirect3DTexture9* linearTex = NULL;
+        HRESULT textureHr = dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8,
+                                               D3DPOOL_DEFAULT, &linearTex, NULL);
+        if (SUCCEEDED(textureHr) && linearTex) {
+            D3DLOCKED_RECT lr;
+            textureHr = linearTex->LockRect(0, &lr, NULL, 0);
+            if (SUCCEEDED(textureHr) && lr.pBits) {
+                uint64_t allocationBytes = lr.Pitch > 0 ? (uint64_t)lr.Pitch * (uint64_t)h : 0;
+                if (lr.Pitch < w * 4 || allocationBytes == 0 ||
+                    allocationBytes > dr->maxTextureBytes ||
+                    dr->textureBytesAllocated > dr->maxTextureBytes - (uint32_t)allocationBytes) {
+                    textureHr = E_OUTOFMEMORY;
+                    HRESULT unlockHr = linearTex->UnlockRect(0);
+                    if (FAILED(unlockHr)) textureHr = unlockHr;
+                } else {
+                    for (int y2 = 0; y2 < h; y2++) {
+                        uint8_t* src = pixels + (size_t)y2 * (size_t)w * 4u;
+                        DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + (size_t)y2 * (size_t)lr.Pitch);
+                        for (int x2 = 0; x2 < w; x2++) {
+                            uint8_t r = src[x2 * 4 + 0];
+                            uint8_t g = src[x2 * 4 + 1];
+                            uint8_t b = src[x2 * 4 + 2];
+                            uint8_t a = src[x2 * 4 + 3];
+                            if (a == 0) { r = 0; g = 0; b = 0; }
+                            dst[x2] = D3DCOLOR_ARGB(a, r, g, b);
+                        }
+                    }
+                    textureHr = linearTex->UnlockRect(0);
+                    if (SUCCEEDED(textureHr)) {
+                        dr->textures[i] = linearTex;
+                        dr->textureBytesAllocated += (uint32_t)allocationBytes;
+                        dr->pageBytes[i] = (uint32_t)allocationBytes;
+                        linearTex = NULL;
+                    }
+                }
+            } else if (SUCCEEDED(textureHr)) {
+                HRESULT unlockHr = linearTex->UnlockRect(0);
+                if (FAILED(unlockHr)) textureHr = unlockHr;
+            }
+        } else if (SUCCEEDED(textureHr)) {
+            textureHr = E_FAIL;
+        }
+
+        if (linearTex) linearTex->Release();
+        if (!dr->textures[i]) {
+            logInfo("BS: D3D9 texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)textureHr);
+        }
+        free(pixels);
+    return dr->textures[i] != NULL;
+}
+
+// Every page lookup goes through here: loads on first use and marks it used this frame.
+// shortcut: a page that fails once (even for lack of room) stays missing until restart.
+static void* d3d9Page(D3D9Renderer* dr, int32_t page) {
+    if (page < 0 || !dr->textures || (uint32_t)page >= dr->textureCount) return NULL;
+    if (!dr->textures[page] && !dr->pageFailed[page] && !d3d9LoadPage(dr, (uint32_t)page))
+        dr->pageFailed[page] = 1;
+    dr->pageLastUse[page] = dr->frameCounter;
+    return dr->textures[page];
+}
+
 static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     IDirect3DDevice9* dev = Dev(dr);
@@ -368,98 +482,16 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         dr->textures = (void**)calloc(dr->textureCount, sizeof(void*));
         dr->textureWidths = (int32_t*)calloc(dr->textureCount, sizeof(int32_t));
         dr->textureHeights = (int32_t*)calloc(dr->textureCount, sizeof(int32_t));
-        if (!dr->textures || !dr->textureWidths || !dr->textureHeights) {
+        dr->pageLastUse = (uint32_t*)calloc(dr->textureCount, sizeof(uint32_t));
+        dr->pageBytes = (uint32_t*)calloc(dr->textureCount, sizeof(uint32_t));
+        dr->pageFailed = (uint8_t*)calloc(dr->textureCount, 1);
+        if (!dr->textures || !dr->textureWidths || !dr->textureHeights ||
+            !dr->pageLastUse || !dr->pageBytes || !dr->pageFailed) {
             logWarn("%s", "D3D9: texture table allocation failed\n");
             return;
         }
     }
 
-    for (uint32_t i = 0; i < dr->textureCount; i++) {
-        Texture* txtr = &dataWin->txtr.textures[i];
-        if (!txtr->blobData || txtr->blobSize == 0 || txtr->blobSize > 32u * 1024u * 1024u) {
-            logInfo("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
-            continue;
-        }
-        int expectedW = 0, expectedH = 0;
-        if (!stbi_info_from_memory(txtr->blobData, (int)txtr->blobSize,
-                                   &expectedW, &expectedH, NULL)) {
-            logInfo("BS: could not inspect TXTR page %u before decode\n", i);
-            continue;
-        }
-        uint64_t pixelBytes = (uint64_t)expectedW * (uint64_t)expectedH * 4u;
-        if (expectedW <= 0 || expectedH <= 0 || expectedW > 8192 || expectedH > 8192 ||
-            pixelBytes == 0 || pixelBytes > 64u * 1024u * 1024u) {
-            logInfo("BS: invalid or oversized TXTR dimensions for page %u (%d x %d)\n",
-                     i, expectedW, expectedH);
-            continue;
-        }
-
-        int w = 0, h = 0;
-        uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int)txtr->blobSize, &w, &h, NULL, 4);
-        if (!pixels) {
-            logWarn("%s", "Failed to decode TXTR page\n");
-            continue;
-        }
-        if (w != expectedW || h != expectedH) {
-            logInfo("BS: TXTR page %u dimensions changed during decode (%d x %d, expected %d x %d)\n",
-                     i, w, h, expectedW, expectedH);
-            stbi_image_free(pixels);
-            continue;
-        }
-
-        dr->textureWidths[i] = w;
-        dr->textureHeights[i] = h;
-
-        // Xbox 360 textures are uploaded through a linear surface. Keep a
-        // strict aggregate budget so malformed WADs cannot exhaust unified RAM.
-        IDirect3DTexture9* linearTex = NULL;
-        HRESULT textureHr = dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8,
-                                               D3DPOOL_DEFAULT, &linearTex, NULL);
-        if (SUCCEEDED(textureHr) && linearTex) {
-            D3DLOCKED_RECT lr;
-            textureHr = linearTex->LockRect(0, &lr, NULL, 0);
-            if (SUCCEEDED(textureHr) && lr.pBits) {
-                uint64_t allocationBytes = lr.Pitch > 0 ? (uint64_t)lr.Pitch * (uint64_t)h : 0;
-                if (lr.Pitch < w * 4 || allocationBytes == 0 ||
-                    allocationBytes > dr->maxTextureBytes ||
-                    dr->textureBytesAllocated > dr->maxTextureBytes - (uint32_t)allocationBytes) {
-                    textureHr = E_OUTOFMEMORY;
-                    HRESULT unlockHr = linearTex->UnlockRect(0);
-                    if (FAILED(unlockHr)) textureHr = unlockHr;
-                } else {
-                    for (int y2 = 0; y2 < h; y2++) {
-                        uint8_t* src = pixels + (size_t)y2 * (size_t)w * 4u;
-                        DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + (size_t)y2 * (size_t)lr.Pitch);
-                        for (int x2 = 0; x2 < w; x2++) {
-                            uint8_t r = src[x2 * 4 + 0];
-                            uint8_t g = src[x2 * 4 + 1];
-                            uint8_t b = src[x2 * 4 + 2];
-                            uint8_t a = src[x2 * 4 + 3];
-                            if (a == 0) { r = 0; g = 0; b = 0; }
-                            dst[x2] = D3DCOLOR_ARGB(a, r, g, b);
-                        }
-                    }
-                    textureHr = linearTex->UnlockRect(0);
-                    if (SUCCEEDED(textureHr)) {
-                        dr->textures[i] = linearTex;
-                        dr->textureBytesAllocated += (uint32_t)allocationBytes;
-                        linearTex = NULL;
-                    }
-                }
-            } else if (SUCCEEDED(textureHr)) {
-                HRESULT unlockHr = linearTex->UnlockRect(0);
-                if (FAILED(unlockHr)) textureHr = unlockHr;
-            }
-        } else if (SUCCEEDED(textureHr)) {
-            textureHr = E_FAIL;
-        }
-
-        if (linearTex) linearTex->Release();
-        if (!dr->textures[i]) {
-            logInfo("BS: D3D9 texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)textureHr);
-        }
-        stbi_image_free(pixels);
-    }
     dr->originalTexturePageCount = dataWin->txtr.count;
     dr->originalTpagCount = dataWin->tpag.count;
     dr->originalSpriteCount = dataWin->sprt.count;
@@ -482,6 +514,9 @@ static void d3d9Destroy(Renderer* renderer) {
     free(dr->textures);
     free(dr->textureWidths);
     free(dr->textureHeights);
+    free(dr->pageLastUse);
+    free(dr->pageBytes);
+    free(dr->pageFailed);
     free(dr->vertexData);
     free(dr->triangleData);
     free(dr->primitiveVertexData);
@@ -511,6 +546,7 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
         dr->renderOffsetX = dr->renderOffsetY = 0.0f;
     }
     dr->guiActive = false;
+    dr->frameCounter++;
     d3d9ResetToGameArea(dr);
 
     // Debug: print once
@@ -662,7 +698,7 @@ static void d3d9DrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
     int32_t texPageId = tpag->texturePageId;
     if (0 > texPageId || (uint32_t)texPageId >= dr->textureCount) return;
-    if (!dr->textures[texPageId]) return;
+    if (!d3d9Page(dr, texPageId)) return;
 
     ensureTexture(dr, texPageId);
 
@@ -737,7 +773,7 @@ static void d3d9DrawSpritePart(Renderer* renderer, int32_t tpagIndex,
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
     int32_t texPageId = tpag->texturePageId;
     if (0 > texPageId || (uint32_t)texPageId >= dr->textureCount) return;
-    if (!dr->textures[texPageId]) return;
+    if (!d3d9Page(dr, texPageId)) return;
 
     ensureTexture(dr, texPageId);
 
@@ -784,7 +820,7 @@ static void d3d9DrawSpritePartModern(Renderer* renderer, int32_t tpagIndex,
     if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return;
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
     int32_t page = tpag->texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) return;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page)) return;
     if (srcW <= 0.0f || srcH <= 0.0f) return;
 
     ensureTexture(dr, page);
@@ -825,7 +861,7 @@ static void d3d9DrawSpritePartColorModern(Renderer* renderer, int32_t tpagIndex,
     if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return;
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
     int32_t page = tpag->texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page] ||
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page) ||
         srcW <= 0.0f || srcH <= 0.0f) return;
 
     ensureTexture(dr, page);
@@ -970,18 +1006,24 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
     if (!corners) corners = flat;
     float lineHeight = lineSeparation >= 0.0f ? lineSeparation : (float)font->emSize;
 
-    // Resolve font texture page
-    int32_t fontTpagIndex = font->tpagIndex;
-    if (0 > fontTpagIndex || (uint32_t)fontTpagIndex >= dw->tpag.count) return;
-
-    TexturePageItem* fontTpag = &dw->tpag.items[fontTpagIndex];
-    int16_t pageId = fontTpag->texturePageId;
-    if (0 > pageId || dr->textureCount <= (uint32_t)pageId) return;
-    if (!dr->textures[pageId]) return;
-
-    float texW = (float)dr->textureWidths[pageId];
-    float texH = (float)dr->textureHeights[pageId];
-    if (texW <= 0 || texH <= 0) return;
+    // Sprite fonts (font_add_sprite; all of Deltarune's) take glyph N from frame N
+    // of a sprite, possibly on different pages. Regular fonts use one atlas region.
+    Sprite* spriteFont = NULL;
+    TexturePageItem* fontTpag = NULL;
+    int32_t pageId = -1;
+    float texW = 0.0f, texH = 0.0f;
+    if (font->isSpriteFont) {
+        if (font->spriteIndex < 0 || (uint32_t)font->spriteIndex >= dw->sprt.count) return;
+        spriteFont = &dw->sprt.sprites[font->spriteIndex];
+    } else {
+        if (0 > font->tpagIndex || (uint32_t)font->tpagIndex >= dw->tpag.count) return;
+        fontTpag = &dw->tpag.items[font->tpagIndex];
+        pageId = fontTpag->texturePageId;
+        if (!d3d9Page(dr, pageId)) return;
+        texW = (float)dr->textureWidths[pageId];
+        texH = (float)dr->textureHeights[pageId];
+        if (texW <= 0 || texH <= 0) return;
+    }
 
     // The core already converted GML '#' newlines before calling drawText (as for upstream renderers).
     const char* processed = text;
@@ -1007,8 +1049,6 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
         cosA = cosf(rad);
         sinA = sinf(rad);
     }
-
-    ensureTexture(dr, (int32_t)pageId);
 
     // Iterate through lines
     float cursorY = valignOffset;
@@ -1041,17 +1081,35 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
                 continue;
             }
 
-            // Compute UVs from glyph position in the font's atlas
-            float u0 = (float)(fontTpag->sourceX + glyph->sourceX) / texW;
-            float v0 = (float)(fontTpag->sourceY + glyph->sourceY) / texH;
-            float u1 = (float)(fontTpag->sourceX + glyph->sourceX + glyph->sourceWidth) / texW;
-            float v1 = (float)(fontTpag->sourceY + glyph->sourceY + glyph->sourceHeight) / texH;
-
-            // Local quad position
+            float u0, v0, u1, v1, glyphW, glyphH;
             float localX0 = cursorX + glyph->offset;
             float localY0 = cursorY;
-            float localX1 = localX0 + (float)glyph->sourceWidth;
-            float localY1 = localY0 + (float)glyph->sourceHeight;
+            int32_t glyphPage = pageId;
+            if (spriteFont) {
+                int32_t frame = (int32_t)(glyph - font->glyphs);
+                int32_t ti = frame >= 0 && frame < (int32_t)spriteFont->textureCount ? spriteFont->tpagIndices[frame] : -1;
+                TexturePageItem* gt = ti >= 0 && (uint32_t)ti < dw->tpag.count ? &dw->tpag.items[ti] : NULL;
+                glyphPage = gt ? gt->texturePageId : -1;
+                if (!gt || !d3d9Page(dr, glyphPage)) { cursorX += glyph->shift; continue; }
+                float tw = (float)dr->textureWidths[glyphPage], th = (float)dr->textureHeights[glyphPage];
+                u0 = gt->sourceX / tw;
+                v0 = gt->sourceY / th;
+                u1 = (gt->sourceX + gt->sourceWidth) / tw;
+                v1 = (gt->sourceY + gt->sourceHeight) / th;
+                glyphW = gt->sourceWidth;
+                glyphH = gt->sourceHeight;
+                localY0 += (float)gt->targetY - (float)font->spriteOriginYAdjust;
+            } else {
+                u0 = (float)(fontTpag->sourceX + glyph->sourceX) / texW;
+                v0 = (float)(fontTpag->sourceY + glyph->sourceY) / texH;
+                u1 = (float)(fontTpag->sourceX + glyph->sourceX + glyph->sourceWidth) / texW;
+                v1 = (float)(fontTpag->sourceY + glyph->sourceY + glyph->sourceHeight) / texH;
+                glyphW = glyph->sourceWidth;
+                glyphH = glyph->sourceHeight;
+            }
+            ensureTexture(dr, glyphPage);
+            float localX1 = localX0 + glyphW;
+            float localY1 = localY0 + glyphH;
 
             // Scale
             float sx0 = localX0 * fontScaleX;
@@ -1113,7 +1171,6 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
             lineStart = lineEnd;
         }
     }
-
 }
 
 static void d3d9Flush(Renderer* renderer) {
@@ -1233,7 +1290,7 @@ static void d3d9DrawSpritePos(Renderer* renderer, int32_t tpagIndex,
     if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return;
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
     int32_t page = tpag->texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) return;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page)) return;
     ensureTexture(dr, page);
     float tw = (float)dr->textureWidths[page], th = (float)dr->textureHeights[page];
     if (tw <= 0.0f || th <= 0.0f) return;
@@ -1542,7 +1599,7 @@ static uint32_t d3d9SpriteGetTexture(Renderer* r, int32_t tpagIndex) {
     DataWin* dw = r->dataWin;
     if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return 0;
     int32_t page = dw->tpag.items[tpagIndex].texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page]) return 0;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page)) return 0;
     return (uint32_t)tpagIndex + 1;
 }
 static uint32_t d3d9SurfaceGetTexture(Renderer* r, int32_t i) { (void)r; (void)i; return 0; }
@@ -1551,7 +1608,7 @@ static float d3d9TextureGetTexelWidth(Renderer* r, uint32_t texID) {
     if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
     D3D9Renderer* dr = (D3D9Renderer*)r;
     int32_t page = dw->tpag.items[texID - 1].texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page] || dr->textureWidths[page] <= 0) return 0.0f;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page) || dr->textureWidths[page] <= 0) return 0.0f;
     return 1.0f / (float)dr->textureWidths[page];
 }
 static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
@@ -1559,7 +1616,7 @@ static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
     if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
     D3D9Renderer* dr = (D3D9Renderer*)r;
     int32_t page = dw->tpag.items[texID - 1].texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page] || dr->textureHeights[page] <= 0) return 0.0f;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page) || dr->textureHeights[page] <= 0) return 0.0f;
     return 1.0f / (float)dr->textureHeights[page];
 }
 static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
@@ -1568,7 +1625,7 @@ static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
     TexturePageItem* t = &dw->tpag.items[texID - 1];
     int32_t page = t->texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !dr->textures[page] ||
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page) ||
         dr->textureWidths[page] <= 0 || dr->textureHeights[page] <= 0) return false;
     float w = (float)dr->textureWidths[page], h = (float)dr->textureHeights[page];
     uv[0] = (float)t->sourceX / w;

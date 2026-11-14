@@ -44,6 +44,12 @@ typedef struct {
     uint32_t textureCount;
     uint32_t textureBytesAllocated;
     uint32_t maxTextureBytes;
+    // Pages load on first use and the least recently used ones are evicted to
+    // stay within maxTextureBytes (Deltarune chapters exceed it when preloaded).
+    uint32_t* pageLastUse; // frameCounter value of the last draw using the page
+    uint32_t* pageBytes;
+    uint8_t* pageFailed;   // decode/upload failed: do not retry every draw
+    uint32_t frameCounter;
 
     // 1x1 white texture for primitives
     void* whiteTexture;

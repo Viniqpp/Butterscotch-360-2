@@ -27,10 +27,13 @@
 // every line to game:\butterscotch.log. Write-through keeps the last lines
 // on disk even if the console crashes or powers off.
 // shortcut: one unbuffered write per line is slow; fine while the port is being brought up.
+extern "C" ULONG __cdecl DbgPrint(const char* format, ...); // kernel export; Xenia copies it into xenia.log
 static HANDLE g_logFile = INVALID_HANDLE_VALUE;
 static void xdkWriteLog(const char* text) {
-    OutputDebugStringA(text);
-    if (g_logFile == INVALID_HANDLE_VALUE) {
+    DbgPrint("%s", text);
+    static bool openTried = false; // read-only game:\ (Xenia, discs): don't retry per line
+    if (!openTried) {
+        openTried = true;
         g_logFile = CreateFileA("game:\\butterscotch.log", GENERIC_WRITE, FILE_SHARE_READ, NULL,
                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
     }
