@@ -22,7 +22,6 @@
 #include "fmod/fmod.h"
 #include "xaudio2_audio.h"
 
-extern "C" unsigned long __cdecl DbgPrint(const char* format, ...);
 
 // ===[ Sound Instance ]===
 
@@ -136,7 +135,7 @@ static bool xdkApplyInstancePitch(XdkSoundInstance* inst, float pitch) {
     if (inst->pVoice) {
         HRESULT hr = inst->pVoice->SetFrequencyRatio(pitch);
         if (FAILED(hr)) {
-            DbgPrint("BS: SetFrequencyRatio failed: hr=0x%08X ratio=%d/1000\n",
+            logInfo("BS: SetFrequencyRatio failed: hr=0x%08X ratio=%d/1000\n",
                      (unsigned)hr, (int)(pitch * 1000.0f));
             return false;
         }
@@ -154,7 +153,7 @@ static void xdkApplyInstanceVolume(AudioSystem* audio, XdkSoundInstance* inst) {
             groupGain = AudioSystem_soundGroupGain(audio, inst->soundIndex);
         }
         HRESULT hr = inst->pVoice->SetVolume(inst->currentGain * xa->masterGain * groupGain);
-        if (FAILED(hr)) DbgPrint("BS: SetVolume update failed: hr=0x%08X\n", (unsigned)hr);
+        if (FAILED(hr)) logInfo("BS: SetVolume update failed: hr=0x%08X\n", (unsigned)hr);
     }
 }
 
@@ -170,7 +169,7 @@ static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileS
     xa->base.dw = dataWin;
     arrput(xa->base.audioGroups, dataWin);
     if (arrlen(xa->base.audioGroups) != 1 || xa->base.audioGroups[0] != dataWin) {
-        DbgPrint("BS: could not allocate main audio-group table\n");
+        logInfo("BS: could not allocate main audio-group table\n");
         return;
     }
     xa->fileSystem = fileSystem;
@@ -180,7 +179,7 @@ static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileS
 
     HRESULT hr = XAudio2Create((IXAudio2**)&xa->pXAudio2, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (FAILED(hr) || !xa->pXAudio2) {
-        OutputDebugStringA("XAudio2Create failed\n");
+        logWarn("%s", "XAudio2Create failed\n");
         if (xa->pXAudio2) {
             ((IXAudio2*)xa->pXAudio2)->Release();
             xa->pXAudio2 = NULL;
@@ -192,7 +191,7 @@ static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileS
     hr = pXA->CreateMasteringVoice((IXAudio2MasteringVoice**)&xa->pMasterVoice,
         XAUDIO2_DEFAULT_CHANNELS, XAUDIO2_DEFAULT_SAMPLERATE, 0, 0, NULL);
     if (FAILED(hr) || !xa->pMasterVoice) {
-        DbgPrint("BS: CreateMasteringVoice failed: 0x%08X\n", (unsigned)hr);
+        logInfo("BS: CreateMasteringVoice failed: 0x%08X\n", (unsigned)hr);
         if (xa->pMasterVoice) {
             ((IXAudio2MasteringVoice*)xa->pMasterVoice)->DestroyVoice();
             xa->pMasterVoice = NULL;
@@ -201,7 +200,7 @@ static void xdkAudioInit(AudioSystem* audio, DataWin* dataWin, FileSystem* fileS
         xa->pXAudio2 = NULL;
         return;
     }
-    DbgPrint("BS: MasteringVoice created OK\n");
+    logInfo("BS: MasteringVoice created OK\n");
 
     xa->initialized = true;
     (void)fileSystem;
@@ -297,7 +296,7 @@ static uint32_t xdkReadLE32(const uint8_t* p) {
 
 static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t priority, bool loop) {
     XdkAudioSystem* xa = (XdkAudioSystem*)audio;
-    if (!xa->initialized) { DbgPrint("BS: audio not initialized\n"); return -1; }
+    if (!xa->initialized) { logInfo("BS: audio not initialized\n"); return -1; }
 
     DataWin* dw = xa->base.dw;
     bool isStream = soundIndex >= XDK_AUDIO_STREAM_INDEX_BASE;
@@ -312,7 +311,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         int32_t streamSlot = soundIndex - XDK_AUDIO_STREAM_INDEX_BASE;
         if (streamSlot < 0 || streamSlot >= XDK_MAX_AUDIO_STREAMS ||
             !xa->streams[streamSlot].active || !xa->streams[streamSlot].filePath) {
-            DbgPrint("BS: invalid audio stream index %d\n", soundIndex);
+            logInfo("BS: invalid audio stream index %d\n", soundIndex);
             return -1;
         }
         externalFile = xa->streams[streamSlot].filePath;
@@ -328,7 +327,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex))
             xdkGroupLoad(audio, groupIndex);
         if (groupIndex > 0 && !xdkGroupIsLoaded(audio, groupIndex)) {
-            DbgPrint("BS: audio group %d is not loaded; refusing sound %d\n", groupIndex, soundIndex);
+            logInfo("BS: audio group %d is not loaded; refusing sound %d\n", groupIndex, soundIndex);
             return -1;
         }
         if (groupIndex < 0 || (uint32_t)groupIndex >= arrlen(audio->audioGroups) ||
@@ -366,7 +365,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     }
 
     if (sound) {
-        DbgPrint("BS: playSound idx=%d name=%s flags=0x%x audioFile=%d\n",
+        logInfo("BS: playSound idx=%d name=%s flags=0x%x audioFile=%d\n",
             soundIndex, sound->name ? sound->name : "?", (unsigned)sound->flags, sound->audioFile);
     }
 
@@ -376,19 +375,19 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
 
     if (inAudo) {
         if (sound->audioFile < 0 || (uint32_t)sound->audioFile >= audioData->audo.count) {
-            DbgPrint("BS: bad audioFile idx %d (audo count=%d)\n", sound->audioFile, (int)audioData->audo.count);
+            logInfo("BS: bad audioFile idx %d (audo count=%d)\n", sound->audioFile, (int)audioData->audo.count);
             destroyInstance(inst);
             return -1;
         }
         DataWin_loadAudoIfNeeded(audioData, (uint32_t)sound->audioFile);
         AudioEntry* entry = &audioData->audo.entries[sound->audioFile];
         if (!entry->data || entry->dataSize == 0) {
-            DbgPrint("BS: empty audio entry\n");
+            logInfo("BS: empty audio entry\n");
             destroyInstance(inst);
             return -1;
         }
         if (entry->dataSize > XDK_MAX_ENCODED_AUDIO_BYTES) {
-            DbgPrint("BS: embedded audio entry exceeds the encoded-audio memory budget\n");
+            logInfo("BS: embedded audio entry exceeds the encoded-audio memory budget\n");
             destroyInstance(inst);
             return -1;
         }
@@ -398,7 +397,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         // External: load .ogg file via FileSystem
         const char* file = isStream ? externalFile : sound->file;
         if (!file || !file[0] || !xa->fileSystem) {
-            DbgPrint("BS: external sound: no file path or no filesystem\n");
+            logInfo("BS: external sound: no file path or no filesystem\n");
             destroyInstance(inst);
             return -1;
         }
@@ -412,7 +411,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         size_t fileLen = strlen(file);
         size_t extensionLen = hasExt ? 0 : 4;
         if (fileLen + extensionLen >= 512) {
-            DbgPrint("BS: external audio path is too long\n");
+            logInfo("BS: external audio path is too long\n");
             destroyInstance(inst);
             return -1;
         }
@@ -424,14 +423,14 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         FileSystem* fs = xa->fileSystem;
         void* handle = fs->vtable->binaryOpen(fs, filename, GML_FILE_BIN_READ);
         if (!handle) {
-            DbgPrint("BS: FileSystem could not open external audio %s\n", filename);
+            logInfo("BS: FileSystem could not open external audio %s\n", filename);
             destroyInstance(inst);
             return -1;
         }
         int32_t binarySize = fs->vtable->binarySize(fs, handle);
         if (binarySize <= 0 || (uint32_t)binarySize > XDK_MAX_ENCODED_AUDIO_BYTES) {
             fs->vtable->binaryClose(fs, handle);
-            DbgPrint("BS: external audio size is invalid or over budget (%d)\n", binarySize);
+            logInfo("BS: external audio size is invalid or over budget (%d)\n", binarySize);
             destroyInstance(inst);
             return -1;
         }
@@ -452,7 +451,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         if (totalRead != binarySize) {
             free(oggData);
             oggData = NULL;
-            DbgPrint("BS: short FileSystem read for external audio %s (%d/%d)\n",
+            logInfo("BS: short FileSystem read for external audio %s (%d/%d)\n",
                      filename, totalRead, binarySize);
             destroyInstance(inst);
             return -1;
@@ -475,7 +474,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         uint32_t riffBytes = xdkReadLE32(oggData + 4);
         if (memcmp(oggData + 8, "WAVE", 4) != 0 || riffBytes < 4 ||
             riffBytes > (uint32_t)(oggSize - 8)) {
-            DbgPrint("BS: invalid RIFF/WAVE header\n");
+            logInfo("BS: invalid RIFF/WAVE header\n");
             if (freeOggData) free(oggData);
             destroyInstance(inst);
             return -1;
@@ -534,14 +533,14 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             dataOffset > (size_t)oggSize || dataSize > (size_t)oggSize - dataOffset ||
             dataSize == 0 || (dataSize % blockAlign) != 0 ||
             dataSize > 0x7fffffffU) {
-            DbgPrint("BS: unsupported or malformed PCM WAV\n");
+            logInfo("BS: unsupported or malformed PCM WAV\n");
             if (freeOggData) free(oggData);
             destroyInstance(inst);
             return -1;
         }
 
         if (!xdkCanAllocatePcm(xa, dataSize)) {
-            DbgPrint("BS: WAV PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
+            logInfo("BS: WAV PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
                      dataSize, xa->activePcmBytes, xa->maxPcmBytes);
             if (freeOggData) free(oggData);
             destroyInstance(inst);
@@ -561,12 +560,12 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             uint16_t value = (uint16_t)pcm[sample];
             pcm[sample] = (short)((value >> 8) | (value << 8));
         }
-        DbgPrint("BS: WAV: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
+        logInfo("BS: WAV: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
     } else {
         int stbErr = 0;
         stb_vorbis* vorbis = stb_vorbis_open_memory(oggData, oggSize, &stbErr, NULL);
         if (!vorbis) {
-            DbgPrint("BS: vorbis open failed: err=%d size=%d\n", stbErr, oggSize);
+            logInfo("BS: vorbis open failed: err=%d size=%d\n", stbErr, oggSize);
             if (freeOggData) free(oggData);
             destroyInstance(inst);
             return -1;
@@ -584,7 +583,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         }
         size_t pcmBytes = (size_t)totalSamples * (size_t)channels * sizeof(short);
         if (!xdkCanAllocatePcm(xa, pcmBytes)) {
-            DbgPrint("BS: OGG PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
+            logInfo("BS: OGG PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
                      (unsigned)pcmBytes, xa->activePcmBytes, xa->maxPcmBytes);
             stb_vorbis_close(vorbis);
             if (freeOggData) free(oggData);
@@ -606,7 +605,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             destroyInstance(inst);
             return -1;
         }
-        DbgPrint("BS: OGG: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
+        logInfo("BS: OGG: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
     }
 
     if (freeOggData) free(oggData);
@@ -620,7 +619,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     uint32_t decodedPcmSize = (uint32_t)(sampleCount * channels * sizeof(short));
     if (decodedPcmSize == 0 || decodedPcmSize > xa->maxPcmBytes ||
         xa->activePcmBytes > xa->maxPcmBytes - decodedPcmSize) {
-        DbgPrint("BS: decoded audio exceeds active PCM budget (requested=%u active=%u limit=%u)\n",
+        logInfo("BS: decoded audio exceeds active PCM budget (requested=%u active=%u limit=%u)\n",
                  decodedPcmSize, xa->activePcmBytes, xa->maxPcmBytes);
         free(pcm);
         destroyInstance(inst);
@@ -656,7 +655,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     IXAudio2* pXA = (IXAudio2*)xa->pXAudio2;
     HRESULT hr = pXA->CreateSourceVoice(&inst->pVoice, (WAVEFORMATEX*)&wfx, 0, XAUDIO2_MAX_FREQ_RATIO, NULL, NULL, NULL);
     if (FAILED(hr) || !inst->pVoice) {
-        DbgPrint("BS: CreateSourceVoice failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: CreateSourceVoice failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return -1;
     }
@@ -674,14 +673,14 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
 
     hr = inst->pVoice->SubmitSourceBuffer(&buf);
     if (FAILED(hr)) {
-        DbgPrint("BS: SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return -1;
     }
     float groupGain = !isStream ? AudioSystem_soundGroupGain(audio, soundIndex) : 1.0f;
     hr = inst->pVoice->SetVolume(inst->currentGain * xa->masterGain * groupGain);
     if (FAILED(hr)) {
-        DbgPrint("BS: SetVolume failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: SetVolume failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return -1;
     }
@@ -691,7 +690,7 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
     }
     hr = inst->pVoice->Start(0);
     if (FAILED(hr)) {
-        DbgPrint("BS: Start failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: Start failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return -1;
     }
@@ -756,7 +755,7 @@ static void xdkPauseInstance(XdkSoundInstance* inst) {
     }
     HRESULT hr = inst->pVoice->Stop(0);
     if (FAILED(hr)) {
-        DbgPrint("BS: XAudio2 pause failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: XAudio2 pause failed: hr=0x%08X\n", (unsigned)hr);
         return;
     }
     inst->paused = true;
@@ -766,7 +765,7 @@ static void xdkResumeInstance(XdkSoundInstance* inst) {
     if (!inst || !inst->active || !inst->paused || !inst->pVoice) return;
     HRESULT hr = inst->pVoice->Start(0);
     if (FAILED(hr)) {
-        DbgPrint("BS: XAudio2 resume failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: XAudio2 resume failed: hr=0x%08X\n", (unsigned)hr);
         return;
     }
     inst->paused = false;
@@ -988,7 +987,7 @@ static void xdkSeekInstance(XdkSoundInstance* inst, float positionSeconds) {
     if (FAILED(hr)) return;
     hr = inst->pVoice->FlushSourceBuffers();
     if (FAILED(hr)) {
-        DbgPrint("BS: seek FlushSourceBuffers failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: seek FlushSourceBuffers failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return;
     }
@@ -1014,7 +1013,7 @@ static void xdkSeekInstance(XdkSoundInstance* inst, float positionSeconds) {
         firstPass.PlayLength = totalFrames - offset;
         hr = inst->pVoice->SubmitSourceBuffer(&firstPass);
         if (FAILED(hr)) {
-            DbgPrint("BS: seek first-pass SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+            logInfo("BS: seek first-pass SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
             destroyInstance(inst);
             return;
         }
@@ -1043,14 +1042,14 @@ static void xdkSeekInstance(XdkSoundInstance* inst, float positionSeconds) {
         hr = inst->pVoice->SubmitSourceBuffer(&buffer);
     }
     if (FAILED(hr)) {
-        DbgPrint("BS: seek SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: seek SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return;
     }
     if (!inst->paused) {
         hr = inst->pVoice->Start(0);
         if (FAILED(hr)) {
-            DbgPrint("BS: seek Start failed: hr=0x%08X\n", (unsigned)hr);
+            logInfo("BS: seek Start failed: hr=0x%08X\n", (unsigned)hr);
             destroyInstance(inst);
         }
     }
@@ -1089,7 +1088,7 @@ static void xdkSetChannelCount(AudioSystem* audio, int32_t count) {
 
 static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
     if (groupIndex <= 0 || !audio->dw || (uint32_t)groupIndex >= audio->dw->agrp.count) {
-        DbgPrint("BS: requested invalid audio group %d\n", groupIndex);
+        logInfo("BS: requested invalid audio group %d\n", groupIndex);
         return;
     }
 
@@ -1099,7 +1098,7 @@ static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
         DataWin* empty = NULL;
         arrput(audio->audioGroups, empty);
         if (arrlen(audio->audioGroups) <= groupIndex) {
-            DbgPrint("BS: could not grow audio-group table for index %d\n", groupIndex);
+            logInfo("BS: could not grow audio-group table for index %d\n", groupIndex);
             return;
         }
     }
@@ -1115,7 +1114,7 @@ static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
 
     FileSystem* fs = ((XdkAudioSystem*)audio)->fileSystem;
     if (!fs || !fs->vtable->fileExists(fs, relativePath)) {
-        DbgPrint("BS: audio group %d missing: %s\n", groupIndex, relativePath);
+        logInfo("BS: audio group %d missing: %s\n", groupIndex, relativePath);
         return;
     }
 
@@ -1130,7 +1129,7 @@ static void xdkGroupLoad(AudioSystem* audio, int32_t groupIndex) {
     DataWin* groupData = DataWin_parse(fullPath, options);
     free(fullPath);
     if (!groupData) {
-        DbgPrint("BS: audio group %d parse failed: %s\n", groupIndex, relativePath);
+        logInfo("BS: audio group %d parse failed: %s\n", groupIndex, relativePath);
         return;
     }
 
@@ -1384,7 +1383,7 @@ static int32_t xdkCreateStream(AudioSystem* audio, const char* filename) {
 
     char* resolved = xa->fileSystem->vtable->resolvePath(xa->fileSystem, filename);
     if (!resolved) {
-        DbgPrint("BS: could not resolve stream path '%s'\n", filename);
+        logInfo("BS: could not resolve stream path '%s'\n", filename);
         return -1;
     }
 
@@ -1424,7 +1423,7 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
     int stbErr = 0;
     stb_vorbis* vorbis = stb_vorbis_open_memory(data, (int)bytes, &stbErr, NULL);
     if (!vorbis) {
-        DbgPrint("BS: playEncoded vorbis open failed: err=%d size=%u\n", stbErr, (unsigned)bytes);
+        logInfo("BS: playEncoded vorbis open failed: err=%d size=%u\n", stbErr, (unsigned)bytes);
         return -1;
     }
 
@@ -1433,14 +1432,14 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
     if (info.channels < 1 || info.channels > 2 || info.sample_rate == 0 || info.sample_rate > XDK_MAX_AUDIO_SAMPLE_RATE ||
         totalSamples == 0 || totalSamples > (unsigned int)(0x7fffffff / (info.channels * (int)sizeof(short)))) {
         stb_vorbis_close(vorbis);
-        DbgPrint("BS: playEncoded unsupported stream metadata\n");
+        logInfo("BS: playEncoded unsupported stream metadata\n");
         return -1;
     }
 
     size_t pcmCapacity = (size_t)totalSamples * (size_t)info.channels * sizeof(short);
     if (!xdkCanAllocatePcm(xa, pcmCapacity)) {
         stb_vorbis_close(vorbis);
-        DbgPrint("BS: encoded PCM exceeds active memory budget before allocation\n");
+        logInfo("BS: encoded PCM exceeds active memory budget before allocation\n");
         return -1;
     }
     short* pcm = (short*)malloc(pcmCapacity);
@@ -1484,7 +1483,7 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
     inst->currentGain = inst->targetGain = inst->startGain = 1.0f;
     if (pcmBytes > xa->maxPcmBytes ||
         xa->activePcmBytes > xa->maxPcmBytes - (uint32_t)pcmBytes) {
-        DbgPrint("BS: encoded PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
+        logInfo("BS: encoded PCM exceeds active memory budget (requested=%u active=%u limit=%u)\n",
                  (unsigned)pcmBytes, xa->activePcmBytes, xa->maxPcmBytes);
         free(pcm);
         destroyInstance(inst);
@@ -1515,7 +1514,7 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
     IXAudio2* pXA = (IXAudio2*)xa->pXAudio2;
     HRESULT hr = pXA->CreateSourceVoice(&inst->pVoice, (WAVEFORMATEX*)&wfx, 0, XAUDIO2_MAX_FREQ_RATIO, NULL, NULL, NULL);
     if (FAILED(hr) || !inst->pVoice) {
-        DbgPrint("BS: playEncoded CreateSourceVoice failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: playEncoded CreateSourceVoice failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return -1;
     }
@@ -1529,24 +1528,24 @@ static int32_t xdkPlayEncoded(AudioSystem* audio, const uint8_t* data, size_t by
 
     hr = inst->pVoice->SubmitSourceBuffer(&buffer);
     if (FAILED(hr)) {
-        DbgPrint("BS: playEncoded SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: playEncoded SubmitSourceBuffer failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return -1;
     }
     hr = inst->pVoice->SetVolume(xa->masterGain);
     if (FAILED(hr) || !xdkApplyInstancePitch(inst, 1.0f)) {
-        DbgPrint("BS: playEncoded voice state setup failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: playEncoded voice state setup failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return -1;
     }
     hr = inst->pVoice->Start(0);
     if (FAILED(hr)) {
-        DbgPrint("BS: playEncoded Start failed: hr=0x%08X\n", (unsigned)hr);
+        logInfo("BS: playEncoded Start failed: hr=0x%08X\n", (unsigned)hr);
         destroyInstance(inst);
         return -1;
     }
 
-    DbgPrint("BS: playEncoded started id=%d ch=%d rate=%u samples=%d loop=%d\n",
+    logInfo("BS: playEncoded started id=%d ch=%d rate=%u samples=%d loop=%d\n",
              instanceId, info.channels, info.sample_rate, sampleCount, loop ? 1 : 0);
     return instanceId;
 }

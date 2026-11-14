@@ -7,9 +7,6 @@
 #include <cstdlib>
 #include <cstring>
 
-// DbgPrint is a C-linkage kernel function — declare it explicitly since
-// we compile .c files as C++ and removed extern "C" wrappers.
-extern "C" ULONG __cdecl DbgPrint(const char* format, ...);
 
 // Core headers — compiled as C++ alongside the .c files (via /TP flag)
 #include "runner.h"
@@ -26,12 +23,37 @@ extern "C" ULONG __cdecl DbgPrint(const char* format, ...);
 #include "xaudio2_audio.h"
 #include "xdk_file_system.h"
 
+// Debug output is invisible on a retail/RGH console without xbdm, so mirror
+// every line to game:\butterscotch.log. Write-through keeps the last lines
+// on disk even if the console crashes or powers off.
+// shortcut: one unbuffered write per line is slow; fine while the port is being brought up.
+static HANDLE g_logFile = INVALID_HANDLE_VALUE;
+static void xdkWriteLog(const char* text) {
+    OutputDebugStringA(text);
+    if (g_logFile == INVALID_HANDLE_VALUE) {
+        g_logFile = CreateFileA("game:\\butterscotch.log", GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
+    }
+    if (g_logFile == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    WriteFile(g_logFile, text, (DWORD)strlen(text), &written, NULL);
+}
+
+static void xdkLog(const char* format, ...) {
+    char line[1024];
+    va_list va;
+    va_start(va, format);
+    vsnprintf(line, sizeof(line), format, va); // compat_msvc.h wrapper: always terminated
+    va_end(va);
+    xdkWriteLog(line);
+}
+
 // The core's log.c forwards every log line to the platform (cli/main.c has the desktop one).
 void platformLog(const logType type, const char* format, va_list va) {
     char line[1024];
-    vsnprintf(line, sizeof(line), format, va); // compat_msvc.h wrapper: always terminated
-    OutputDebugStringA(type == LOG_TYPE_ERROR ? "BS error: " : type == LOG_TYPE_WARNING ? "BS warning: " : "BS: ");
-    OutputDebugStringA(line);
+    vsnprintf(line, sizeof(line), format, va);
+    xdkWriteLog(type == LOG_TYPE_ERROR ? "BS error: " : type == LOG_TYPE_WARNING ? "BS warning: " : "BS: ");
+    xdkWriteLog(line);
 }
 
 // ===[ POSIX clock polyfill implementation ]===
@@ -77,7 +99,7 @@ static void setupDefaultMappings(void) {
     xpadMappings = (XpadMapping*)malloc(sizeof(defaults));
     if (!xpadMappings) {
         xpadMappingCount = 0;
-        DbgPrint("BS: default controller mapping allocation failed\n");
+        xdkLog("BS: default controller mapping allocation failed\n");
         return;
     }
     memcpy(xpadMappings, defaults, sizeof(defaults));
@@ -164,11 +186,11 @@ static void platformSwapBuffers(D3D9Renderer* renderer) {
     if (renderer->sceneActive) {
         HRESULT hr = device->EndScene();
         renderer->sceneActive = false;
-        if (FAILED(hr)) DbgPrint("BS: EndScene failed: 0x%08X\n", (unsigned)hr);
+        if (FAILED(hr)) xdkLog("BS: EndScene failed: 0x%08X\n", (unsigned)hr);
     }
 
     HRESULT hr = device->Present(NULL, NULL, NULL, NULL);
-    if (FAILED(hr)) DbgPrint("BS: Present failed: 0x%08X\n", (unsigned)hr);
+    if (FAILED(hr)) xdkLog("BS: Present failed: 0x%08X\n", (unsigned)hr);
 }
 
 static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
@@ -198,11 +220,11 @@ static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
 // ===[ Main Entry Point ]===
 
 VOID __cdecl main() {
-    DbgPrint("BS: main() entered\n");
+    xdkLog("BS: main() entered\n");
 
     IDirect3D9* pD3D = Direct3DCreate9(D3D_SDK_VERSION);
-    if (!pD3D) { DbgPrint("BS: FATAL: D3D create failed\n"); return; }
-    DbgPrint("BS: D3D9 created\n");
+    if (!pD3D) { xdkLog("BS: FATAL: D3D create failed\n"); return; }
+    xdkLog("BS: D3D9 created\n");
 
     D3DPRESENT_PARAMETERS d3dpp;
     ZeroMemory(&d3dpp, sizeof(d3dpp));
@@ -222,11 +244,11 @@ VOID __cdecl main() {
                                     D3DCREATE_HARDWARE_VERTEXPROCESSING,
                                     &d3dpp, &pd3dDevice);
     if (FAILED(hr)) {
-        DbgPrint("BS: FATAL: CreateDevice failed\n");
+        xdkLog("BS: FATAL: CreateDevice failed\n");
         shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
     }
-    DbgPrint("BS: D3D device created\n");
+    xdkLog("BS: D3D device created\n");
 
 
     // ===[ Locate data.win ]===
@@ -243,27 +265,27 @@ VOID __cdecl main() {
         NULL,
     };
 
-    DbgPrint("BS: searching for data.win\n");
+    xdkLog("BS: searching for data.win\n");
     char msg[256];
     for (int i = 0; searchPaths[i]; i++) {
-        DbgPrint("BS: trying %s\n", searchPaths[i]);
+        xdkLog("BS: trying %s\n", searchPaths[i]);
 
         FILE* testFile = fopen(searchPaths[i], "rb");
         if (testFile) {
             fclose(testFile);
             dataWinPath = searchPaths[i];
-            DbgPrint("BS: found data.win at %s\n", dataWinPath);
+            xdkLog("BS: found data.win at %s\n", dataWinPath);
             break;
         }
     }
 
     if (!dataWinPath) {
-        DbgPrint("BS: FATAL: data.win not found\n");
+        xdkLog("BS: FATAL: data.win not found\n");
         shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
     }
 
-    DbgPrint("BS: parsing data.win\n");
+    xdkLog("BS: parsing data.win\n");
 
     DataWinParserOptions parseOpts;
     memset(&parseOpts, 0, sizeof(parseOpts));
@@ -279,13 +301,13 @@ VOID __cdecl main() {
     DataWin* dataWin = DataWin_parse(dataWinPath, parseOpts);
 
     if (!dataWin) {
-        DbgPrint("BS: FATAL: DataWin_parse returned NULL\n");
+        xdkLog("BS: FATAL: DataWin_parse returned NULL\n");
         shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
     }
-    DbgPrint("BS: data.win parsed OK\n");
+    xdkLog("BS: data.win parsed OK\n");
 
-    DbgPrint("BS: game=%s\n", dataWin->gen8.displayName ? dataWin->gen8.displayName : "Unknown");
+    xdkLog("BS: game=%s\n", dataWin->gen8.displayName ? dataWin->gen8.displayName : "Unknown");
 
     // ===[ Load CONFIG.JSN (optional) ]===
     char configPath[512];
@@ -314,56 +336,56 @@ VOID __cdecl main() {
                 if (readOk && bytesRead == configSize) {
                     configText[bytesRead] = '\0';
                     configRoot = JsonReader_parse(configText);
-                    if (configRoot) OutputDebugStringA("Loaded CONFIG.JSN\n");
+                    if (configRoot) xdkLog("Loaded CONFIG.JSN\n");
                 } else {
-                    OutputDebugStringA("Ignoring unreadable CONFIG.JSN\n");
+                    xdkLog("Ignoring unreadable CONFIG.JSN\n");
                 }
                 free(configText);
             } else {
-                OutputDebugStringA("Ignoring CONFIG.JSN: out of memory\n");
+                xdkLog("Ignoring CONFIG.JSN: out of memory\n");
             }
         } else {
-            OutputDebugStringA("Ignoring invalid or oversized CONFIG.JSN\n");
+            xdkLog("Ignoring invalid or oversized CONFIG.JSN\n");
         }
         CloseHandle(hConfig);
     }
 
     // ===[ Create Subsystems ]===
-    DbgPrint("BS: creating subsystems\n");
+    xdkLog("BS: creating subsystems\n");
     XdkFileSystem* xdkFs = XdkFileSystem_create(dataWinPath);
     FileSystem* fileSystem = (FileSystem*)xdkFs;
 
-    DbgPrint("BS: creating renderer\n");
+    xdkLog("BS: creating renderer\n");
     Renderer* renderer = D3D9Renderer_create(pd3dDevice);
 
-    DbgPrint("BS: creating VM\n");
+    xdkLog("BS: creating VM\n");
     VMContext* vm = VM_create(dataWin);
 
-    DbgPrint("BS: creating audio system\n");
+    xdkLog("BS: creating audio system\n");
     XdkAudioSystem* xdkAudio = XdkAudioSystem_create();
     AudioSystem* audioSystem = (AudioSystem*)xdkAudio;
 
     if (!xdkFs || !renderer || !vm || !xdkAudio) {
-        DbgPrint("BS: FATAL: subsystem allocation failed (fs=%d renderer=%d vm=%d audio=%d)\n",
+        xdkLog("BS: FATAL: subsystem allocation failed (fs=%d renderer=%d vm=%d audio=%d)\n",
                  xdkFs != NULL, renderer != NULL, vm != NULL, xdkAudio != NULL);
         shutdownXdk(NULL, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
 
-    DbgPrint("BS: creating modern runner\n");
+    xdkLog("BS: creating modern runner\n");
     Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, 0);
     if (!runner) {
-        DbgPrint("BS: FATAL: Runner_create returned NULL\n");
+        xdkLog("BS: FATAL: Runner_create returned NULL\n");
         shutdownXdk(NULL, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
     if (!((D3D9Renderer*)renderer)->initialized) {
-        DbgPrint("BS: FATAL: D3D9 renderer initialization failed\n");
+        xdkLog("BS: FATAL: D3D9 renderer initialization failed\n");
         shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
     if (!xdkAudio->initialized) {
-        DbgPrint("BS: FATAL: XAudio2 initialization failed\n");
+        xdkLog("BS: FATAL: XAudio2 initialization failed\n");
         shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
@@ -406,21 +428,21 @@ VOID __cdecl main() {
     // Runner_create owns renderer/audio initialization in the modern runtime.
 
     // Initialize first room
-    DbgPrint("BS: init first room\n");
+    xdkLog("BS: init first room\n");
     Runner_initFirstRoom(runner);
-    DbgPrint("BS: first room OK\n");
+    xdkLog("BS: first room OK\n");
 
     Gen8* gen8 = &dataWin->gen8;
     int32_t gameW = (int32_t)gen8->defaultWindowWidth;
     int32_t gameH = (int32_t)gen8->defaultWindowHeight;
-    DbgPrint("BS: gameW=%d gameH=%d screenW=%d screenH=%d\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
+    xdkLog("BS: gameW=%d gameH=%d screenW=%d screenH=%d\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    DbgPrint("BS: entering modern main loop\n");
+    xdkLog("BS: entering modern main loop\n");
 
     LARGE_INTEGER freq, lastTime, currentTime;
     if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 ||
         !QueryPerformanceCounter(&lastTime)) {
-        DbgPrint("BS: FATAL: performance counter unavailable\n");
+        xdkLog("BS: FATAL: performance counter unavailable\n");
         shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
     }
@@ -428,7 +450,7 @@ VOID __cdecl main() {
 
     while (!runner->shouldExit) {
         if (!QueryPerformanceCounter(&currentTime)) {
-            DbgPrint("BS: performance counter query failed; stopping main loop\n");
+            xdkLog("BS: performance counter query failed; stopping main loop\n");
             break;
         }
         double deltaTime = (double)(currentTime.QuadPart - lastTime.QuadPart) / (double)freq.QuadPart;
@@ -530,6 +552,6 @@ VOID __cdecl main() {
     }
 
     // ===[ Cleanup ]===
-    DbgPrint("BS: shutting down runner\n");
+    xdkLog("BS: shutting down runner\n");
     shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
 }

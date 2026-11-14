@@ -15,7 +15,6 @@
 #include "runner.h"
 #include "vm_builtins.h"
 
-extern "C" unsigned long __cdecl DbgPrint(const char* format, ...);
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -103,7 +102,7 @@ static void flushBatch(D3D9Renderer* dr) {
         hr = dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, dr->quadCount * 2,
                                   triangles, sizeof(SpriteVertex));
     }
-    if (FAILED(hr)) DbgPrint("BS: D3D9 quad batch flush failed: hr=0x%08X\n", (unsigned)hr);
+    if (FAILED(hr)) logInfo("BS: D3D9 quad batch flush failed: hr=0x%08X\n", (unsigned)hr);
     dr->quadCount = 0;
 }
 
@@ -222,19 +221,19 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     // Allocate CPU vertex staging buffer
     dr->vertexData = (uint8_t*)malloc(D3D9_MAX_QUADS * D3D9_VERTS_PER_QUAD * sizeof(SpriteVertex));
     if (!dr->vertexData) {
-        OutputDebugStringA("D3D9: vertex staging allocation failed\n");
+        logWarn("%s", "D3D9: vertex staging allocation failed\n");
         return;
     }
     dr->triangleData = malloc(D3D9_MAX_QUADS * 6u * sizeof(SpriteVertex));
     if (!dr->triangleData) {
-        OutputDebugStringA("D3D9: triangle staging allocation failed\n");
+        logWarn("%s", "D3D9: triangle staging allocation failed\n");
         return;
     }
     dr->primitiveVertexCapacity = D3D9_MAX_PRIMITIVE_VERTICES;
     dr->primitiveVertexData = malloc((size_t)dr->primitiveVertexCapacity * sizeof(SpriteVertex));
     if (!dr->primitiveVertexData) {
         dr->primitiveVertexCapacity = 0;
-        OutputDebugStringA("D3D9: primitive vertex allocation failed; immediate primitives disabled\n");
+        logWarn("%s", "D3D9: primitive vertex allocation failed; immediate primitives disabled\n");
     }
 
     // Compile shaders from source
@@ -244,8 +243,8 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     HRESULT hr = D3DXCompileShader(g_vsSource, (UINT)strlen(g_vsSource),
                                    NULL, NULL, "main", "vs_2_0", 0, &pCode, &pErr, NULL);
     if (FAILED(hr) || !pCode) {
-        OutputDebugStringA("VS compile failed: ");
-        if (pErr) OutputDebugStringA((const char*)pErr->GetBufferPointer());
+        logWarn("%s", "VS compile failed: ");
+        if (pErr) logWarn("%s", (const char*)pErr->GetBufferPointer());
         if (pErr) pErr->Release();
         if (pCode) pCode->Release();
         return;
@@ -255,15 +254,15 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     pCode->Release();
     if (pErr) { pErr->Release(); pErr = NULL; }
     if (FAILED(hr) || !dr->pVertexShader) {
-        OutputDebugStringA("D3D9: CreateVertexShader failed\n");
+        logWarn("%s", "D3D9: CreateVertexShader failed\n");
         return;
     }
 
     hr = D3DXCompileShader(g_psSource, (UINT)strlen(g_psSource),
                            NULL, NULL, "main", "ps_2_0", 0, &pCode, &pErr, NULL);
     if (FAILED(hr) || !pCode) {
-        OutputDebugStringA("PS compile failed: ");
-        if (pErr) OutputDebugStringA((const char*)pErr->GetBufferPointer());
+        logWarn("%s", "PS compile failed: ");
+        if (pErr) logWarn("%s", (const char*)pErr->GetBufferPointer());
         if (pErr) pErr->Release();
         if (pCode) pCode->Release();
         return;
@@ -273,7 +272,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     pCode->Release();
     if (pErr) { pErr->Release(); pErr = NULL; }
     if (FAILED(hr) || !dr->pPixelShader) {
-        OutputDebugStringA("D3D9: CreatePixelShader failed\n");
+        logWarn("%s", "D3D9: CreatePixelShader failed\n");
         return;
     }
 
@@ -286,7 +285,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     };
     hr = dev->CreateVertexDeclaration(decl, (IDirect3DVertexDeclaration9**)&dr->pVertexDecl);
     if (FAILED(hr) || !dr->pVertexDecl) {
-        OutputDebugStringA("D3D9: CreateVertexDeclaration failed\n");
+        logWarn("%s", "D3D9: CreateVertexDeclaration failed\n");
         return;
     }
 
@@ -294,21 +293,21 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     IDirect3DTexture9* whiteTex = NULL;
     hr = dev->CreateTexture(1, 1, 1, 0, D3DFMT_LIN_A8R8G8B8, D3DPOOL_DEFAULT, &whiteTex, NULL);
     if (FAILED(hr) || !whiteTex) {
-        OutputDebugStringA("D3D9: white texture creation failed\n");
+        logWarn("%s", "D3D9: white texture creation failed\n");
         return;
     }
     D3DLOCKED_RECT lr;
     hr = whiteTex->LockRect(0, &lr, NULL, 0);
     if (FAILED(hr) || !lr.pBits) {
         whiteTex->Release();
-        OutputDebugStringA("D3D9: white texture lock failed\n");
+        logWarn("%s", "D3D9: white texture lock failed\n");
         return;
     }
     *(DWORD*)lr.pBits = 0xFFFFFFFF;
     hr = whiteTex->UnlockRect(0);
     if (FAILED(hr)) {
         whiteTex->Release();
-        OutputDebugStringA("D3D9: white texture unlock failed\n");
+        logWarn("%s", "D3D9: white texture unlock failed\n");
         return;
     }
     dr->whiteTexture = whiteTex;
@@ -320,7 +319,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         dr->textureWidths = (int32_t*)calloc(dr->textureCount, sizeof(int32_t));
         dr->textureHeights = (int32_t*)calloc(dr->textureCount, sizeof(int32_t));
         if (!dr->textures || !dr->textureWidths || !dr->textureHeights) {
-            OutputDebugStringA("D3D9: texture table allocation failed\n");
+            logWarn("%s", "D3D9: texture table allocation failed\n");
             return;
         }
     }
@@ -328,19 +327,19 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     for (uint32_t i = 0; i < dr->textureCount; i++) {
         Texture* txtr = &dataWin->txtr.textures[i];
         if (!txtr->blobData || txtr->blobSize == 0 || txtr->blobSize > 32u * 1024u * 1024u) {
-            DbgPrint("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
+            logInfo("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
             continue;
         }
         int expectedW = 0, expectedH = 0;
         if (!stbi_info_from_memory(txtr->blobData, (int)txtr->blobSize,
                                    &expectedW, &expectedH, NULL)) {
-            DbgPrint("BS: could not inspect TXTR page %u before decode\n", i);
+            logInfo("BS: could not inspect TXTR page %u before decode\n", i);
             continue;
         }
         uint64_t pixelBytes = (uint64_t)expectedW * (uint64_t)expectedH * 4u;
         if (expectedW <= 0 || expectedH <= 0 || expectedW > 8192 || expectedH > 8192 ||
             pixelBytes == 0 || pixelBytes > 64u * 1024u * 1024u) {
-            DbgPrint("BS: invalid or oversized TXTR dimensions for page %u (%d x %d)\n",
+            logInfo("BS: invalid or oversized TXTR dimensions for page %u (%d x %d)\n",
                      i, expectedW, expectedH);
             continue;
         }
@@ -348,11 +347,11 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
         int w = 0, h = 0;
         uint8_t* pixels = stbi_load_from_memory(txtr->blobData, (int)txtr->blobSize, &w, &h, NULL, 4);
         if (!pixels) {
-            OutputDebugStringA("Failed to decode TXTR page\n");
+            logWarn("%s", "Failed to decode TXTR page\n");
             continue;
         }
         if (w != expectedW || h != expectedH) {
-            DbgPrint("BS: TXTR page %u dimensions changed during decode (%d x %d, expected %d x %d)\n",
+            logInfo("BS: TXTR page %u dimensions changed during decode (%d x %d, expected %d x %d)\n",
                      i, w, h, expectedW, expectedH);
             stbi_image_free(pixels);
             continue;
@@ -407,7 +406,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 
         if (linearTex) linearTex->Release();
         if (!dr->textures[i]) {
-            DbgPrint("BS: D3D9 texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)textureHr);
+            logInfo("BS: D3D9 texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)textureHr);
         }
         stbi_image_free(pixels);
     }
@@ -418,7 +417,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     dr->currentTextureIndex = -1;
     dr->quadCount = 0;
     dr->initialized = true;
-    DbgPrint("BS: D3D9 renderer initialized (%u texture pages)\n", dr->textureCount);
+    logInfo("BS: D3D9 renderer initialized (%u texture pages)\n", dr->textureCount);
 }
 
 static void d3d9Destroy(Renderer* renderer) {
@@ -462,7 +461,7 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     // Debug: print once
     static bool printedOnce = false;
     if (!printedOnce) {
-        DbgPrint("BS: renderScale=%d/1000 offsetX=%d offsetY=%d gameW=%d gameH=%d screenW=%d screenH=%d\n",
+        logInfo("BS: renderScale=%d/1000 offsetX=%d offsetY=%d gameW=%d gameH=%d screenW=%d screenH=%d\n",
             (int)(dr->renderScale * 1000), (int)dr->renderOffsetX, (int)dr->renderOffsetY,
             gameW, gameH, windowW, windowH);
         printedOnce = true;
@@ -477,7 +476,7 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     dr->primitiveTexture = 0;
     HRESULT sceneHr = dev->BeginScene();
     if (FAILED(sceneHr)) {
-        DbgPrint("BS: D3D9 BeginScene failed: hr=0x%08X\n", (unsigned)sceneHr);
+        logInfo("BS: D3D9 BeginScene failed: hr=0x%08X\n", (unsigned)sceneHr);
         return;
     }
     dr->sceneActive = true;
@@ -1355,7 +1354,7 @@ static void d3d9PrimitiveEnd(Renderer* renderer) {
             hr = Dev(dr)->DrawPrimitiveUP(type, primitiveCount,
                 dr->primitiveVertexData, sizeof(SpriteVertex));
         }
-        if (FAILED(hr)) DbgPrint("BS: primitive DrawPrimitiveUP failed: hr=0x%08X\n", (unsigned)hr);
+        if (FAILED(hr)) logInfo("BS: primitive DrawPrimitiveUP failed: hr=0x%08X\n", (unsigned)hr);
     }
 
     dr->primitiveActive = false;
