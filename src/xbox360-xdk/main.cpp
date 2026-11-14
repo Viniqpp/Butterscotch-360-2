@@ -62,17 +62,24 @@ void platformLog(const logType type, const char* format, va_list va) {
 // game_change(working_directory, "-game <path>") -> g_nextGame, a game:\ path.
 // Segments are normalised so ".." never climbs above game:\ (where the launcher sits).
 static char g_nextGame[256];
+static char g_nextArgs[256];
 static void xdkPrepareGameChange(Runner* runner) {
     const char* params = runner->pendingLaunchParameters;
     const char* wd = runner->pendingWorkingDirectory ? runner->pendingWorkingDirectory : "";
     const char* rel = strstr(params, "-game");
     rel = rel ? rel + 5 : params;
-    while (*rel == ' ' || *rel == '"') rel++;
+    while (*rel == ' ') rel++;
+    bool quoted = *rel == '"';
+    if (quoted) rel++;
+    // The path ends at its closing quote or the first space; the rest are game
+    // arguments (Deltarune: "launcher switch_-1 returning_0") for parameter_string().
+    size_t relLen = strcspn(rel, quoted ? "\"" : " ");
+    const char* rest = rel + relLen + (quoted && rel[relLen] ? 1 : 0);
+    while (*rest == ' ') rest++;
+    snprintf(g_nextArgs, sizeof(g_nextArgs), "%s", rest);
     char joined[512];
     // An absolute host path (C:\...) means nothing on the console: keep only the relative part.
-    snprintf(joined, sizeof(joined), "%s\\%s", strchr(wd, ':') ? "" : wd, rel);
-    char* quote = strchr(joined, '"');
-    if (quote) *quote = '\0';
+    snprintf(joined, sizeof(joined), "%s\\%.*s", strchr(wd, ':') ? "" : wd, (int)relLen, rel);
     strcpy(g_nextGame, "game:");
     for (char* seg = strtok(joined, "\\/"); seg; seg = strtok(NULL, "\\/")) {
         if (!strcmp(seg, ".") || !seg[0]) continue;
@@ -85,7 +92,7 @@ static void xdkPrepareGameChange(Runner* runner) {
         strcat(g_nextGame, "\\");
         strcat(g_nextGame, seg);
     }
-    xdkLog("BS: game_change(\"%s\", \"%s\") -> %s\n", wd, params, g_nextGame);
+    xdkLog("BS: game_change(\"%s\", \"%s\") -> %s [%s]\n", wd, params, g_nextGame, g_nextArgs);
 }
 
 // ===[ POSIX clock polyfill implementation ]===
@@ -307,11 +314,14 @@ VOID __cdecl main() {
 
     // A game_change (e.g. Deltarune's chapter select) relaunches this XEX with
     // the next data.win in the launch data; otherwise search the usual places.
-    static char launchPath[256];
+    static char launchPath[520]; // "path\0arguments\0" from xdkPrepareGameChange
+    const char* launchArgs = NULL;
     DWORD launchSize = 0;
     if (XGetLaunchDataSize(&launchSize) == ERROR_SUCCESS && launchSize > 0 && launchSize <= sizeof(launchPath) &&
         XGetLaunchData(launchPath, sizeof(launchPath)) == ERROR_SUCCESS) {
         launchPath[sizeof(launchPath) - 1] = '\0';
+        size_t pathSize = strlen(launchPath) + 1;
+        if (pathSize < launchSize) launchArgs = launchPath + pathSize;
         FILE* testFile = fopen(launchPath, "rb");
         if (testFile) {
             fclose(testFile);
@@ -454,6 +464,14 @@ VOID __cdecl main() {
         xdkLog("BS: FATAL: Runner_create returned NULL\n");
         shutdownXdk(NULL, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
         return;
+    }
+    // parameter_count()/parameter_string(): argv[0] like the PC runner, then any
+    // game_change arguments (Deltarune chapters check "launcher", "returning_N").
+    arrput(runner->gameArgs, _strdup(dataWinPath));
+    if (launchArgs && launchArgs[0]) {
+        char args[256];
+        snprintf(args, sizeof(args), "%s", launchArgs);
+        for (char* tok = strtok(args, " "); tok; tok = strtok(NULL, " ")) arrput(runner->gameArgs, _strdup(tok));
     }
     if (!((D3D9Renderer*)renderer)->initialized) {
         xdkLog("BS: FATAL: D3D9 renderer initialization failed\n");
@@ -655,7 +673,11 @@ VOID __cdecl main() {
     xdkLog("BS: shutting down runner\n");
     shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
     if (g_nextGame[0]) { // relaunch ourselves for the next data.win; does not return on success
-        XSetLaunchData(g_nextGame, (DWORD)strlen(g_nextGame) + 1);
+        char launchData[520]; // "path\0arguments\0"
+        size_t pathSize = strlen(g_nextGame) + 1, argsSize = strlen(g_nextArgs) + 1;
+        memcpy(launchData, g_nextGame, pathSize);
+        memcpy(launchData + pathSize, g_nextArgs, argsSize);
+        XSetLaunchData(launchData, (DWORD)(pathSize + argsSize));
         XLaunchNewImage("game:\\default.xex", 0);
     }
 }
