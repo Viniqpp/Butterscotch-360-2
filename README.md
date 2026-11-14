@@ -23,7 +23,37 @@ The main development work happens on the
 [`refresh2/modern-upstream-migration` branch](https://github.com/Viniqpp/Butterscotch-360-2/tree/refresh2/modern-upstream-migration).
 The original `main` branch is being kept separate while the rework is developed.
 
-**Status: experimental and incomplete.** The modern core and several platform adapters have been migrated, but the D3D9 renderer still needs its modern interface implementation. The XDK build and actual Xbox 360 runtime have not yet been verified. See the [migration notes](docs/XBOX360_REFRESH2_MIGRATION.md) for technical progress and known blockers.
+**Status: experimental; now running on Xbox 360 hardware.** The modern runtime migration, XDK platform adapters and D3D9 renderer integration are implemented far enough to build and launch the runner on an RGH Xbox 360. Undertale has launched in an initial hardware test, but has not yet received a full compatibility/regression pass. Deltarune Chapter 1 currently reaches the game loop but displays a black screen and produces no audible output. Neither title should be considered fully supported yet.
+
+The XDK Smoke and Release configurations have previously compiled with the Xbox 360 XDK 21256.3 toolchain. That successful build predates some later branch changes, so the current branch head still needs a fresh XDK rebuild. Hardware testing is separate from compile verification. See the [migration notes](docs/XBOX360_REFRESH2_MIGRATION.md) and [XDK build/deploy guide](docs/XDK_21256_BUILD_AND_DEPLOY.md) for details.
+
+## Refresh2 progress and legacy issue retests
+
+Refresh2 is more than a build-system update: it replaces the old runner core with modern upstream code and adapts the Xbox 360 renderer, audio system, filesystem and main loop to the newer interfaces.
+
+| Original Xbox 360 port issue | Refresh2 work relevant to it | Current assessment |
+| --- | --- | --- |
+| Audio could play at the wrong speed | Reworked XAudio2 integration, modern pitch handling, audio groups and external audio-stream support | **Not confirmed fixed.** The implementation is substantially different; compare the same tracks on hardware. |
+| 4:3 output was not properly optimized | Dynamic output dimensions, viewport scaling, camera/view-projection transforms and separate GUI projection handling | **Not confirmed fixed.** Test with an actual 4:3 output mode. |
+| Performance slowdowns | Modern frame lifecycle, accumulated simulation steps with rendering after catch-up, and per-frame step/draw/present timing logs | **Potential improvement.** Hardware profiling in demanding areas is still required. |
+| Undyne's spear aiming was incorrect | Camera and view-angle transforms are now applied by the renderer | **Unverified.** The sprite-rotation path itself also needs to be checked in the Undyne fight. |
+| Original Deltarune `SURVEY_PROGRAM` did not boot | Modern WAD/parser and VM migration plus updated platform adapters | **Not fixed or proven by the migration alone.** A Chapter 1 hardware test currently reaches the main loop but renders a black screen; no sound was heard. |
+
+### Current implementation coverage
+
+- **Renderer:** implements 72 of the modern 81 renderer-vtable entries. Nine optional callbacks remain unset. User-created surfaces, custom shaders/uniforms and several advanced drawing features are still unsupported or incomplete.
+- **Audio:** implements all 31 modern audio-vtable entries. This does not mean every audio feature is complete: unsupported operations may return safe failure/no-op results, and playback still needs game-by-game verification.
+- **Filesystem:** implements all 20 modern filesystem-vtable entries, including binary access, streaming handles and directory operations.
+- **Runtime and input:** uses the modern runner lifecycle and publishes native Xbox controller state to the modern gamepad API.
+- **Diagnostics:** writes `game:\\butterscotch.log` and periodically reports simulation, rendering and presentation timings.
+
+### Hardware test notes
+
+The initial Undertale test on the current development build appeared to run well, but only a limited portion of the game has been exercised. Treat this as an encouraging smoke test, not a compatibility certification.
+
+The current Deltarune Chapter 1 test successfully parsed `data.win`, initialized the VM, renderer and audio system, loaded the initial room, changed rooms and continued entering the main loop. The captured log also reports a missing external file, `game:\\mus\\AUDIO_DRONE.ogg`. This is a confirmed missing asset for that test setup, but it does not by itself explain the black screen or prove that it is the only missing audio file. The renderer's known surface and shader gaps are plausible causes of missing visuals and require targeted tracing.
+
+The original port's known issues are therefore **regression targets**, not bugs that should be marked fixed based only on source changes. Compatibility claims should be updated only after the relevant game section or feature has been tested on the console.
 
 ## AI-assisted development
 
