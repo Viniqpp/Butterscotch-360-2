@@ -285,6 +285,7 @@ static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes) {
 static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
     IDirect3DDevice9* dev = Dev(dr);
         Texture* txtr = &dr->base.dataWin->txtr.textures[i];
+        DataWin_loadTxtrIfNeeded(dr->base.dataWin, i);
         if (!txtr->blobData || txtr->blobSize == 0 || txtr->blobSize > 32u * 1024u * 1024u) {
             logInfo("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
             return false;
@@ -357,6 +358,11 @@ static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
             logInfo("BS: D3D9 texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)textureHr);
         }
         free(pixels);
+    // Lazy mode: drop the compressed blob once uploaded; an evicted page re-reads it from disk.
+    if (dr->base.dataWin->lazyLoadTextures) {
+        free(txtr->blobData);
+        txtr->blobData = NULL;
+    }
     return dr->textures[i] != NULL;
 }
 

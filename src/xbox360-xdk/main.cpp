@@ -1,4 +1,4 @@
-// Butterscotch Xbox 360 — XDK Entry Point
+// Butterscotch Xbox 360 ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â XDK Entry Point
 // Uses official Xbox 360 SDK: D3D9, XAudio2, XInputGetState
 
 #include <xtl.h>
@@ -8,7 +8,7 @@
 #include <cstring>
 
 
-// Core headers — compiled as C++ alongside the .c files (via /TP flag)
+// Core headers ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â compiled as C++ alongside the .c files (via /TP flag)
 #include "runner.h"
 #include "runner_keyboard.h"
 #include "runner_gamepad.h"
@@ -296,7 +296,7 @@ VOID __cdecl main() {
         return;
     }
 
-    xdkLog("BS: parsing data.win\n");
+    { MEMORYSTATUS m0; GlobalMemoryStatus(&m0); xdkLog("BS: parsing data.win (free=%uMB)\n", (unsigned)(m0.dwAvailPhys >> 20)); }
 
     DataWinParserOptions parseOpts;
     memset(&parseOpts, 0, sizeof(parseOpts));
@@ -309,6 +309,11 @@ VOID __cdecl main() {
     parseOpts.parseVari = true;  parseOpts.parseFunc = true;  parseOpts.parseStrg = true;
     parseOpts.parseTxtr = true;  parseOpts.parseAudo = true;
     parseOpts.skipLoadingPreciseMasksForNonPreciseSprites = true;
+    // 512 MB is shared by CPU and GPU: read texture/audio blobs and rooms from disk on demand
+    // instead of keeping the whole data.win (126 MB for Deltarune Ch3) resident.
+    parseOpts.lazyLoadTextures = true;
+    parseOpts.lazyLoadAudio = true;
+    parseOpts.lazyLoadRooms = true;
     DataWin* dataWin = DataWin_parse(dataWinPath, parseOpts);
 
     if (!dataWin) {
@@ -316,7 +321,15 @@ VOID __cdecl main() {
         shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
     }
-    xdkLog("BS: data.win parsed OK\n");
+    { // Compressed texture/audio data kept in RAM (lazy loading keeps this near zero).
+        uint64_t texBytes = 0, audioBytes = 0;
+        for (uint32_t i = 0; i < dataWin->txtr.count; i++)
+            if (dataWin->txtr.textures[i].blobData) texBytes += dataWin->txtr.textures[i].blobSize;
+        for (uint32_t i = 0; i < dataWin->audo.count; i++)
+            if (dataWin->audo.entries[i].data) audioBytes += dataWin->audo.entries[i].dataSize;
+        xdkLog("BS: data.win parsed OK (resident blobs: textures %uMB, audio %uMB)\n",
+               (unsigned)(texBytes >> 20), (unsigned)(audioBytes >> 20));
+    }
 
     xdkLog("BS: game=%s\n", dataWin->gen8.displayName ? dataWin->gen8.displayName : "Unknown");
 
@@ -556,8 +569,11 @@ VOID __cdecl main() {
             perfPresentMs += perfT3 - perfT2;
             // Every 60 rendered frames: where the time goes (game logic vs CPU draw vs GPU present).
             if (++perfFrames == 60) {
-                xdkLog("BS perf: per frame step=%.1fms (%d steps) draw=%.1fms present=%.1fms\n",
-                       perfStepMs / 60.0, perfSteps, perfDrawMs / 60.0, perfPresentMs / 60.0);
+                MEMORYSTATUS mem;
+                GlobalMemoryStatus(&mem);
+                xdkLog("BS perf: per frame step=%.1fms (%d steps) draw=%.1fms present=%.1fms free=%uMB\n",
+                       perfStepMs / 60.0, perfSteps, perfDrawMs / 60.0, perfPresentMs / 60.0,
+                       (unsigned)(mem.dwAvailPhys / (1024 * 1024)));
                 perfStepMs = perfDrawMs = perfPresentMs = 0.0;
                 perfFrames = perfSteps = 0;
             }
