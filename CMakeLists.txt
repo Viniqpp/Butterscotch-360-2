@@ -720,12 +720,17 @@ if(PLATFORM STREQUAL "cli" OR PLATFORM STREQUAL "vita" OR PLATFORM STREQUAL "swi
         target_link_options(butterscotch PRIVATE -fsanitize=address)
     endif()
 
-    #gamecontrollerdb
-    add_custom_command(TARGET butterscotch POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_SOURCE_DIR}/vendor/gamecontrollerdb.txt
-            $<TARGET_FILE_DIR:butterscotch>/gamecontrollerdb.txt
-    )
+    # Optional SDL game-controller mapping database. Some source-only/headless
+    # builds do not include this data file, so do not fail the build when absent.
+    if(EXISTS "${CMAKE_SOURCE_DIR}/vendor/gamecontrollerdb.txt")
+        add_custom_command(TARGET butterscotch POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_SOURCE_DIR}/vendor/gamecontrollerdb.txt
+                $<TARGET_FILE_DIR:butterscotch>/gamecontrollerdb.txt
+        )
+    else()
+        message(STATUS "vendor/gamecontrollerdb.txt not present; skipping optional controller database copy")
+    endif()
 elseif(PLATFORM STREQUAL "android")
     if (NOT ENABLE_MODERN_GL)
         message(FATAL_ERROR "Android requires modern gl!")
