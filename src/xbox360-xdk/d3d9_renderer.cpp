@@ -11,6 +11,9 @@
 #include "utils.h"
 #include "text_utils.h"
 #include "d3d9_renderer.h"
+#include "d3d9_transform.h"
+#include "runner.h"
+#include "vm_builtins.h"
 
 extern "C" unsigned long __cdecl DbgPrint(const char* format, ...);
 
@@ -132,14 +135,67 @@ static SpriteVertex* allocQuad(D3D9Renderer* dr) {
     return v;
 }
 
-// Transform a game-space point to screen-space pixels (with pillarbox centering)
+// Transform a world-space point to back-buffer pixels through the active GML matrices.
+// shortcut: ignores clip-space w, so d3d perspective projections draw as orthographic; add a w-divide if a 3D game needs it.
 static inline void transformPoint(D3D9Renderer* dr, float inX, float inY, float* outX, float* outY) {
-    // Game-space: view → port mapping
-    float gx = dr->portOffsetX + (inX - dr->offsetX) * dr->portScaleX;
-    float gy = dr->portOffsetY + (inY - dr->offsetY) * dr->portScaleY;
-    // Screen-space: uniform scale + center offset
-    *outX = gx * dr->renderScale + dr->renderOffsetX;
-    *outY = gy * dr->renderScale + dr->renderOffsetY;
+    Matrix4f_transformPoint(&dr->screenTransform, inX, inY, outX, outY);
+}
+
+// screenTransform = NDC->viewport pixels * WVP; see d3d9_transform.h for the Y convention.
+static void d3d9RebuildTransform(D3D9Renderer* dr) {
+    D3D9Transform_build(&dr->screenTransform, &dr->base.gmlMatrices[MATRIX_WORLD_VIEW_PROJECTION],
+                        dr->viewportX, dr->viewportY, dr->viewportW, dr->viewportH, dr->hostTargetFlipY);
+}
+
+// Viewport given in application-surface (game) coordinates; the application
+// surface aliases the letterboxed region of the back buffer on this backend.
+static void d3d9SetGameViewport(D3D9Renderer* dr, float x, float y, float w, float h) {
+    dr->viewportX = x * dr->renderScale + dr->renderOffsetX;
+    dr->viewportY = y * dr->renderScale + dr->renderOffsetY;
+    dr->viewportW = w * dr->renderScale;
+    dr->viewportH = h * dr->renderScale;
+}
+
+static void d3d9SetProjection(D3D9Renderer* dr, const Matrix4f* view, const Matrix4f* projection) {
+    flushBatch(dr);
+    Renderer_applyProjection(&dr->base, view, projection);
+    d3d9RebuildTransform(dr);
+}
+
+// Default ortho over the whole application surface, as a freshly bound target has.
+static void d3d9ResetToGameArea(D3D9Renderer* dr) {
+    Matrix4f view, projection;
+    Matrix4f_identity(&view);
+    Matrix4f_viewProjection(&projection, 0.0f, 0.0f, (float)dr->gameW, (float)dr->gameH, 0.0f);
+    dr->hostTargetFlipY = false;
+    d3d9SetGameViewport(dr, 0.0f, 0.0f, (float)dr->gameW, (float)dr->gameH);
+    d3d9SetProjection(dr, &view, &projection);
+}
+
+// Mirrors upstream GLCommon_beginGUI/setGuiProjection: the GUI camera is
+// published to the runner because core d3d_* code keys off GUI_CAMERA.
+static void d3d9ApplyGuiCamera(D3D9Renderer* dr, int32_t guiW, int32_t guiH) {
+    Renderer* r = &dr->base;
+    Matrix4f view, projection;
+    D3D9Transform_guiCamera(&view, &projection, (float)guiW, (float)guiH);
+    r->cameraCurrent = GUI_CAMERA;
+    if (r->runner) {
+        GMLCamera* camera = &r->runner->guiCamera;
+        camera->allocated = true;
+        camera->viewX = 0.0;
+        camera->viewY = 0.0;
+        camera->viewWidth = guiW;
+        camera->viewHeight = guiH;
+        camera->borderX = 0;
+        camera->borderY = 0;
+        camera->speedX = 0;
+        camera->speedY = 0;
+        camera->objectId = -1;
+        camera->viewAngle = 0;
+        camera->viewMatrix = view;
+        camera->projectionMatrix = projection;
+    }
+    d3d9SetProjection(dr, &view, &projection);
 }
 
 // ===[ Vtable Implementations ]===
@@ -159,6 +215,9 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     renderer->blendFactors.dst = bm_inv_src_alpha;
     renderer->blendFactors.srcAlpha = bm_src_alpha;
     renderer->blendFactors.dstAlpha = bm_inv_src_alpha;
+    // All vertices go through WORLD_VIEW_PROJECTION; a zeroed matrix would collapse every draw.
+    for (int i = 0; i < MATRICES_MAX; i++) Matrix4f_identity(&renderer->gmlMatrices[i]);
+    Matrix4f_identity(&dr->screenTransform);
 
     // Allocate CPU vertex staging buffer
     dr->vertexData = (uint8_t*)malloc(D3D9_MAX_QUADS * D3D9_VERTS_PER_QUAD * sizeof(SpriteVertex));
@@ -364,6 +423,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 
 static void d3d9Destroy(Renderer* renderer) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    VMBuiltins_resetD3D(renderer); // frees renderer->d3d, as every upstream renderer does
     if (dr->textures) {
         for (uint32_t i = 0; i < dr->textureCount; i++) {
             if (dr->textures[i]) ((IDirect3DTexture9*)dr->textures[i])->Release();
@@ -389,8 +449,6 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
 
     dr->gameW = gameW;
     dr->gameH = gameH;
-    dr->screenW = windowW;
-    dr->screenH = windowH;
 
     // Compute uniform scale to fit game in screen with letterboxing
     float scaleX = (float)windowW / (float)gameW;
@@ -398,6 +456,8 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     dr->renderScale = (scaleX < scaleY) ? scaleX : scaleY;
     dr->renderOffsetX = ((float)windowW - (float)gameW * dr->renderScale) * 0.5f;
     dr->renderOffsetY = ((float)windowH - (float)gameH * dr->renderScale) * 0.5f;
+    dr->guiActive = false;
+    d3d9ResetToGameArea(dr);
 
     // Debug: print once
     static bool printedOnce = false;
@@ -480,28 +540,53 @@ static void d3d9BeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int3
                            int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     IDirect3DDevice9* dev = Dev(dr);
-    (void)viewAngle; // TODO: support rotated views
     if (!dr->initialized || !dev || viewW <= 0 || viewH <= 0) return;
 
-    D3DVIEWPORT9 vp;
-    vp.X = 0;
-    vp.Y = 0;
-    vp.Width = (DWORD)dr->screenW;
-    vp.Height = (DWORD)dr->screenH;
-    vp.MinZ = 0.0f;
-    vp.MaxZ = 1.0f;
-    dev->SetViewport(&vp);
+    // The D3D viewport stays full-screen (D3DRS_VIEWPORTENABLE=FALSE); the
+    // port and camera live in screenTransform. Like upstream GLCommon_beginView,
+    // apply the view's camera matrices (they carry view_angle), then let an
+    // active d3d_start override them.
+    dr->hostTargetFlipY = false;
+    d3d9SetGameViewport(dr, (float)portX, (float)portY, (float)portW, (float)portH);
+    Runner* runner = renderer->runner;
+    GMLCamera* camera = NULL;
+    if (runner) {
+        int32_t viewCurrent = runner->viewsEnabled ? runner->viewCurrent : 0;
+        renderer->cameraCurrent = runner->views[viewCurrent].cameraId;
+        camera = Runner_getCameraById(runner, renderer->cameraCurrent);
+    }
+    if (camera) {
+        d3d9SetProjection(dr, &camera->viewMatrix, &camera->projectionMatrix);
+    } else {
+        Matrix4f view, projection;
+        Matrix4f_identity(&view);
+        Matrix4f_viewProjection(&projection, (float)viewX, (float)viewY,
+                                (float)viewW, (float)viewH, viewAngle);
+        d3d9SetProjection(dr, &view, &projection);
+    }
+    VMBuiltins_applyD3DDefaultView(renderer, (float)viewX, (float)viewY,
+                                   (float)viewW, (float)viewH, viewAngle);
+}
 
-    // Store view transform for point mapping
-    dr->offsetX = (float)viewX;
-    dr->offsetY = (float)viewY;
-    dr->portScaleX = (float)portW / (float)viewW;
-    dr->portScaleY = (float)portH / (float)viewH;
-    dr->portOffsetX = (float)portX;
-    dr->portOffsetY = (float)portY;
+// Runner_drawViews (surface views) and camera_apply / d3d_set_projection_*.
+static void d3d9ApplyProjection(Renderer* renderer, const Matrix4f* viewMatrix,
+                                const Matrix4f* projectionMatrix) {
+    if (!viewMatrix || !projectionMatrix) return;
+    d3d9SetProjection((D3D9Renderer*)renderer, viewMatrix, projectionMatrix);
+}
 
-    // No projection matrix needed — vertices are pre-transformed screen coords.
-    // D3DRS_VIEWPORTENABLE=FALSE means the GPU uses positions directly as pixels.
+// matrix_set / sequences / d3d_transform_*: any of VIEW, PROJECTION, WORLD.
+static void d3d9SetMatrix(Renderer* renderer, int32_t matrixType, Matrix4f matrix) {
+    if (matrixType < 0 || matrixType >= MATRICES_MAX) return;
+    // Sequences set the world matrix per node; skip redundant flushes like upstream glSetMatrix.
+    if (memcmp(&renderer->gmlMatrices[matrixType], &matrix, sizeof(Matrix4f)) == 0) return;
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    flushBatch(dr);
+    renderer->gmlMatrices[matrixType] = matrix;
+    // Renderer_applyProjection copies its inputs before writing, so aliasing is safe.
+    Renderer_applyProjection(renderer, &renderer->gmlMatrices[MATRIX_VIEW],
+                             &renderer->gmlMatrices[MATRIX_PROJECTION]);
+    d3d9RebuildTransform(dr);
 }
 
 static void d3d9EndView(Renderer* renderer) {
@@ -800,16 +885,34 @@ static void d3d9DrawLineColor(Renderer* renderer, float x1, float y1, float x2, 
     transformPoint(dr, x1 - nx, y1 - ny, &sx, &sy); setVertex(&v[3], sx, sy, 0, 1, c1r, c1g, c1b, c1a);
 }
 
+// Bilinear gradient across one text line: c[0]=top-left, c[1]=top-right, c[2]=bottom-right, c[3]=bottom-left.
+static void d3d9GradientColor(const uint32_t* c, float tx, float ty, float alpha,
+                              float* r, float* g, float* b, float* a) {
+    if (tx < 0.0f) tx = 0.0f; else if (tx > 1.0f) tx = 1.0f;
+    if (ty < 0.0f) ty = 0.0f; else if (ty > 1.0f) ty = 1.0f;
+    float ch[3];
+    for (int s = 0; s < 3; s++) {
+        float tl = (float)((c[0] >> (s * 8)) & 0xFF), tr = (float)((c[1] >> (s * 8)) & 0xFF);
+        float br = (float)((c[2] >> (s * 8)) & 0xFF), bl = (float)((c[3] >> (s * 8)) & 0xFF);
+        float top = tl + (tr - tl) * tx, bottom = bl + (br - bl) * tx;
+        ch[s] = (top + (bottom - top) * ty) / 255.0f;
+    }
+    *r = ch[0]; *g = ch[1]; *b = ch[2]; *a = alpha;
+}
+
+// lineSeparation < 0 uses the font's em size; corners == NULL draws in drawColor.
 static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
-                          float xscale, float yscale, float angleDeg) {
+                          float xscale, float yscale, float angleDeg,
+                          float lineSeparation, const uint32_t* corners, float alpha) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     DataWin* dw = renderer->dataWin;
     int32_t fontIndex = renderer->drawFont;
-    if (0 > fontIndex || (uint32_t)fontIndex >= dw->font.count) return;
+    if (!text || 0 > fontIndex || (uint32_t)fontIndex >= dw->font.count) return;
 
     Font* font = &dw->font.fonts[fontIndex];
-    uint32_t color = renderer->drawColor;
-    float alpha = renderer->drawAlpha;
+    uint32_t flat[4] = { renderer->drawColor, renderer->drawColor, renderer->drawColor, renderer->drawColor };
+    if (!corners) corners = flat;
+    float lineHeight = lineSeparation >= 0.0f ? lineSeparation : (float)font->emSize;
 
     // Resolve font texture page
     int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
@@ -824,18 +927,16 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
     float texH = (float)dr->textureHeights[pageId];
     if (texW <= 0 || texH <= 0) return;
 
-    float cr, cg, cb, ca;
-    bgrToFloatColor(color, alpha, &cr, &cg, &cb, &ca);
-
     // Preprocess: convert # to \n (and \# to literal #)
     char* processed = TextUtils_preprocessGmlText(text);
+    if (!processed) return;
     int32_t textLen = (int32_t)strlen(processed);
 
     // Count lines
     int32_t lineCount = TextUtils_countLines(processed, textLen);
 
     // Vertical alignment offset
-    float totalHeight = (float)lineCount * (float)font->emSize;
+    float totalHeight = (float)lineCount * lineHeight;
     float valignOffset = 0;
     if (renderer->drawValign == 1) valignOffset = -totalHeight / 2.0f;
     else if (renderer->drawValign == 2) valignOffset = -totalHeight;
@@ -921,13 +1022,17 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
 
             SpriteVertex* v = allocQuad(dr);
             float screenX, screenY;
+            float gx[4] = { localX0, localX1, localX1, localX0 };
+            float gy[4] = { localY0, localY0, localY1, localY1 };
             for (int i = 0; i < 4; i++) {
                 transformPoint(dr, x + cx[i], y + cy[i], &screenX, &screenY);
                 v[i].x = screenX;
                 v[i].y = screenY;
                 v[i].z = 0.0f;
                 v[i].w = 1.0f;
-                v[i].r = cr; v[i].g = cg; v[i].b = cb; v[i].a = ca;
+                float tx = lineWidth > 0.0f ? (gx[i] - halignOffset) / lineWidth : 0.0f;
+                float ty = lineHeight > 0.0f ? (gy[i] - cursorY) / lineHeight : 0.0f;
+                d3d9GradientColor(corners, tx, ty, alpha, &v[i].r, &v[i].g, &v[i].b, &v[i].a);
             }
             v[0].u = u0; v[0].v = v0;
             v[1].u = u1; v[1].v = v0;
@@ -944,7 +1049,7 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
             }
         }
 
-        cursorY += (float)font->emSize;
+        cursorY += lineHeight;
 
         // Advance past the newline
         if (textLen > lineEnd) {
@@ -991,28 +1096,52 @@ static int32_t d3d9CreateSpriteFromSurfaceModern(Renderer* renderer, int32_t sur
 // GUI coordinates are independent of the last room view. The platform presents
 // after this pass, so these hooks must never end or present the D3D scene.
 static void d3d9EndFrameInit(Renderer* renderer) { flushBatch((D3D9Renderer*)renderer); }
+// Like upstream: keeps the viewport, re-applies the GUI camera. User surfaces
+// are not implemented here, so the upstream user-surface flip never applies.
+static void d3d9SetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
+                                 int32_t portW, int32_t portH, bool renderingToUserSurface) {
+    (void)portW; (void)portH; (void)renderingToUserSurface;
+    d3d9ApplyGuiCamera((D3D9Renderer*)renderer, guiW, guiH);
+}
+// GUI/Pre/Post ports arrive in window (back-buffer) pixels. As in upstream
+// GLCommon_beginGUI the GUI is letterboxed by the viewport, not the projection.
 static void d3d9BeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH,
                          int32_t portX, int32_t portY, int32_t portW, int32_t portH,
                          int32_t targetSurfaceId) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
-    (void)targetSurfaceId; // User surfaces are not implemented by this backend yet.
     flushBatch(dr);
-    dr->offsetX = dr->offsetY = 0.0f;
-    dr->portOffsetX = (float)portX;
-    dr->portOffsetY = (float)portY;
-    dr->portScaleX = guiW > 0 ? (float)portW / (float)guiW : 1.0f;
-    dr->portScaleY = guiH > 0 ? (float)portH / (float)guiH : 1.0f;
+    // surface_reset_target re-enters beginGUI; save the room's world matrix only once.
+    if (!dr->guiActive) {
+        dr->savedGuiWorld = renderer->gmlMatrices[MATRIX_WORLD];
+        dr->guiActive = true;
+    }
+    Matrix4f_identity(&renderer->gmlMatrices[MATRIX_WORLD]);
+
+    int32_t x, y, w, h;
+    D3D9Transform_letterbox(guiW, guiH, portW, portH, &x, &y, &w, &h);
+    dr->viewportX = (float)(portX + x);
+    dr->viewportY = (float)(portY + y);
+    dr->viewportW = (float)w;
+    dr->viewportH = (float)h;
+    // Host framebuffer and application_surface are both the back buffer here.
+    // Any other target id is unsupported (setRenderTarget rejects it) and is
+    // drawn like a surface, without the host flip.
+    dr->hostTargetFlipY = targetSurfaceId == RENDER_TARGET_HOST_FRAMEBUFFER ||
+                          targetSurfaceId == APPLICATION_SURFACE_ID;
+    d3d9ApplyGuiCamera(dr, guiW, guiH);
 }
-static void d3d9SetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
-                                 int32_t portW, int32_t portH, bool renderingToUserSurface) {
+static void d3d9EndGUI(Renderer* renderer) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
-    (void)renderingToUserSurface;
     flushBatch(dr);
-    dr->offsetX = dr->offsetY = 0.0f;
-    dr->portScaleX = guiW > 0 ? (float)portW / (float)guiW : 1.0f;
-    dr->portScaleY = guiH > 0 ? (float)portH / (float)guiH : 1.0f;
+    if (dr->guiActive) {
+        dr->guiActive = false;
+        renderer->gmlMatrices[MATRIX_WORLD] = dr->savedGuiWorld;
+    }
+    dr->hostTargetFlipY = false;
+    Renderer_applyProjection(renderer, &renderer->gmlMatrices[MATRIX_VIEW],
+                             &renderer->gmlMatrices[MATRIX_PROJECTION]);
+    d3d9RebuildTransform(dr);
 }
-static void d3d9EndGUI(Renderer* renderer) { flushBatch((D3D9Renderer*)renderer); }
 
 static void d3d9DrawSpritePos(Renderer* renderer, int32_t tpagIndex,
                               float x1, float y1, float x2, float y2,
@@ -1089,20 +1218,13 @@ static void d3d9DrawTriangle(Renderer* renderer, float x1, float y1, float x2, f
 }
 static void d3d9DrawTextModern(Renderer* renderer, const char* text, float x, float y,
                                float xs, float ys, float angle, float lineSeparation) {
-    (void)lineSeparation;
-    d3d9DrawText(renderer, text, x, y, xs, ys, angle);
+    d3d9DrawText(renderer, text, x, y, xs, ys, angle, lineSeparation, NULL, renderer->drawAlpha);
 }
 static void d3d9DrawTextColorModern(Renderer* renderer, const char* text, float x, float y,
                                    float xs, float ys, float angle, int32_t c1, int32_t c2,
                                    int32_t c3, int32_t c4, float alpha, float lineSeparation) {
-    (void)c2; (void)c3; (void)c4; (void)lineSeparation;
-    uint32_t oldColor = renderer->drawColor;
-    float oldAlpha = renderer->drawAlpha;
-    renderer->drawColor = (uint32_t)c1;
-    renderer->drawAlpha = alpha;
-    d3d9DrawText(renderer, text, x, y, xs, ys, angle);
-    renderer->drawColor = oldColor;
-    renderer->drawAlpha = oldAlpha;
+    uint32_t corners[4] = { (uint32_t)c1, (uint32_t)c2, (uint32_t)c3, (uint32_t)c4 };
+    d3d9DrawText(renderer, text, x, y, xs, ys, angle, lineSeparation, corners, alpha);
 }
 static void d3d9DrawSpriteTiled(Renderer* renderer, int32_t tpagIndex, float originX, float originY,
                                 float x, float y, float xs, float ys, bool tileX, bool tileY,
@@ -1143,6 +1265,14 @@ static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, i
     // back onto itself is intentionally a no-op. Other surface IDs are unsupported.
     (void)renderer; (void)surfaceID; (void)sl; (void)st; (void)sw; (void)sh;
     (void)x; (void)y; (void)xs; (void)ys; (void)angle; (void)color; (void)alpha;
+}
+// draw_surface_general: same surface semantics as drawSurface (called unguarded by the core).
+static void d3d9DrawSurfaceColor(Renderer* renderer, int32_t surfaceID, int32_t sl, int32_t st,
+                                 int32_t sw, int32_t sh, float x, float y, float xs, float ys,
+                                 float angle, uint32_t c1, uint32_t c2, uint32_t c3, uint32_t c4,
+                                 float alpha) {
+    (void)c2; (void)c3; (void)c4;
+    d3d9DrawSurface(renderer, surfaceID, sl, st, sw, sh, x, y, xs, ys, angle, c1, alpha);
 }
 
 static void d3d9PrimitiveBegin(Renderer* renderer, int32_t primitiveType) {
@@ -1246,9 +1376,19 @@ static bool d3d9SurfaceExists(Renderer* r, int32_t id) {
     return id == APPLICATION_SURFACE_ID;
 }
 static bool d3d9SetRenderTarget(Renderer* r, int32_t id, bool implicit) {
-    (void)implicit;
     if (id != APPLICATION_SURFACE_ID && id != RENDER_TARGET_HOST_FRAMEBUFFER) return false;
-    flushBatch((D3D9Renderer*)r);
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    flushBatch(dr);
+    if (id != APPLICATION_SURFACE_ID) return true;
+    d3d9ResetToGameArea(dr);
+    // Like upstream glSetRenderTarget: surface_reset_target back to the
+    // application surface restores the current view's camera.
+    if (implicit && r->runner) {
+        Runner* runner = r->runner;
+        r->cameraCurrent = runner->views[runner->viewsEnabled ? runner->viewCurrent : 0].cameraId;
+        GMLCamera* camera = Runner_getCameraById(runner, r->cameraCurrent);
+        if (camera) d3d9SetProjection(dr, &camera->viewMatrix, &camera->projectionMatrix);
+    }
     return true;
 }
 static int32_t d3d9EnsureApplicationSurface(Renderer* r, int32_t w, int32_t h) {
@@ -1492,6 +1632,9 @@ static void d3d9InitializeRendererVtable(void) {
     d3d9RendererVtable.endFrameEnd = d3d9EndFrame;
     d3d9RendererVtable.beginView = d3d9BeginView;
     d3d9RendererVtable.endView = d3d9EndView;
+    d3d9RendererVtable.applyProjection = d3d9ApplyProjection;
+    d3d9RendererVtable.setMatrix = d3d9SetMatrix;
+    d3d9RendererVtable.drawSurfaceColor = d3d9DrawSurfaceColor;
     d3d9RendererVtable.beginGUI = d3d9BeginGUI;
     d3d9RendererVtable.setGuiProjection = d3d9SetGuiProjection;
     d3d9RendererVtable.endGUI = d3d9EndGUI;

@@ -48,14 +48,16 @@ typedef struct {
     // 1x1 white texture for primitives
     void* whiteTexture;
 
-    // View transform state
-    float portScaleX, portScaleY; // portW/viewW, portH/viewH
-    float offsetX, offsetY;       // viewX, viewY
-    float portOffsetX, portOffsetY; // portX, portY (game coords)
+    // World -> back-buffer pixel transform: viewport(NDC) * gmlMatrices[WORLD_VIEW_PROJECTION].
+    // Rebuilt whenever the viewport or any GML matrix changes.
+    Matrix4f screenTransform;
+    float viewportX, viewportY, viewportW, viewportH; // back-buffer pixels
+    bool hostTargetFlipY;    // GUI pass bound to the back buffer: clip -1 is the top row
+    bool guiActive;          // inside beginGUI..endGUI (beginGUI re-enters on surface_reset_target)
+    Matrix4f savedGuiWorld;  // world matrix restored by endGUI, as upstream does
 
     // Frame dimensions
     int32_t gameW, gameH;
-    int32_t screenW, screenH;
 
     // Letterbox: uniform-scaled render area within screen
     float renderScale;   // uniform scale factor

@@ -376,14 +376,19 @@ VOID __cdecl main() {
 
         JsonValue* mappingsObj = JsonReader_getJsonValueByKey(configRoot, "controllerMappings");
         if (mappingsObj && JsonReader_isObject(mappingsObj)) {
-            xpadMappingCount = JsonReader_objectLength(mappingsObj);
-            xpadMappings = (XpadMapping*)malloc(sizeof(XpadMapping) * xpadMappingCount);
-            for (int i = 0; i < xpadMappingCount; i++) {
+            int count = JsonReader_objectLength(mappingsObj);
+            xpadMappings = count > 0 ? (XpadMapping*)malloc(sizeof(XpadMapping) * count) : NULL;
+            xpadMappingCount = 0;
+            for (int i = 0; xpadMappings && i < count; i++) {
                 const char* btnStr = JsonReader_getJsonKeyByIndex(mappingsObj, i);
                 JsonValue* gmlVal = JsonReader_getJsonValueByIndex(mappingsObj, i);
-                xpadMappings[i].xpadButton = (WORD)atoi(btnStr);
-                xpadMappings[i].gmlKey = (int32_t)JsonReader_getInt(gmlVal);
+                if (!btnStr || !gmlVal) continue;
+                xpadMappings[xpadMappingCount].xpadButton = (WORD)atoi(btnStr);
+                xpadMappings[xpadMappingCount].gmlKey = (int32_t)JsonReader_getInt(gmlVal);
+                xpadMappingCount++;
             }
+            // Empty or unusable custom mappings fall back to the defaults below.
+            if (xpadMappingCount == 0) { free(xpadMappings); xpadMappings = NULL; }
         }
     }
 
