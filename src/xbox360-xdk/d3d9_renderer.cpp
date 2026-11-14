@@ -75,19 +75,38 @@ static inline void bgrToFloatColor(uint32_t bgr, float alpha, float* outR, float
 
 // ===[ Batch Flush ]===
 
+typedef struct {
+    void* rt;  // IDirect3DSurface9* (EDRAM)
+    void* tex; // IDirect3DTexture9* the target is resolved into
+    int32_t w, h, allocW, allocH;
+    bool exists;
+    bool hasContent; // tex holds the last resolved image
+} D3D9Surface;
+
+// surface_get_texture handles live above the TPAG handle range (TPAG index + 1).
+#define D3D9_SURFACE_HANDLE 0x40000000u
+
+static D3D9Surface* d3d9Surface(D3D9Renderer* dr, int32_t id) {
+    D3D9Surface* s = (D3D9Surface*)dr->surfaces;
+    return id >= 0 && id < (int32_t)arrlen(s) && s[id].exists ? &s[id] : NULL;
+}
+
+// Batch texture index: >= 0 texture page, -1 white, <= -2 surface (-2 - id).
+static void* d3d9TextureForIndex(D3D9Renderer* dr, int32_t index) {
+    if (index >= 0) return (uint32_t)index < dr->textureCount ? dr->textures[index] : NULL;
+    if (index == -1) return dr->whiteTexture;
+    D3D9Surface* s = d3d9Surface(dr, -2 - index);
+    return s && s->hasContent ? s->tex : dr->whiteTexture;
+}
+
 static void flushBatch(D3D9Renderer* dr) {
     if (!dr) return;
     if (!dr->sceneActive) { dr->quadCount = 0; return; }
     if (!dr->vertexData || !dr->triangleData || !dr->pd3dDevice || dr->quadCount == 0) return;
 
     IDirect3DDevice9* dev = Dev(dr);
-    IDirect3DBaseTexture9* texture = dr->whiteTexture
-        ? (IDirect3DBaseTexture9*)dr->whiteTexture : NULL;
-    if (dr->currentTextureIndex >= 0 &&
-        (uint32_t)dr->currentTextureIndex < dr->textureCount &&
-        dr->textures[dr->currentTextureIndex]) {
-        texture = (IDirect3DBaseTexture9*)dr->textures[dr->currentTextureIndex];
-    }
+    void* chosen = d3d9TextureForIndex(dr, dr->currentTextureIndex);
+    IDirect3DBaseTexture9* texture = (IDirect3DBaseTexture9*)(chosen ? chosen : dr->whiteTexture);
 
     HRESULT hr = dev->SetTexture(0, texture);
     if (SUCCEEDED(hr)) {
@@ -119,6 +138,10 @@ static void ensureTexture(D3D9Renderer* dr, int32_t textureIndex) {
 static void* d3d9Page(D3D9Renderer* dr, int32_t page);
 
 static int32_t d3d9TextureHandleToPage(D3D9Renderer* dr, uint32_t textureHandle) {
+    if (textureHandle >= D3D9_SURFACE_HANDLE) { // surface_get_texture
+        int32_t id = (int32_t)(textureHandle - D3D9_SURFACE_HANDLE);
+        return d3d9Surface(dr, id) ? -2 - id : -1;
+    }
     if (!dr || !dr->base.dataWin || textureHandle == 0) return -1;
     DataWin* dw = dr->base.dataWin;
     uint32_t tpagIndex = textureHandle - 1;
@@ -165,7 +188,8 @@ static void d3d9SetProjection(D3D9Renderer* dr, const Matrix4f* view, const Matr
     d3d9RebuildTransform(dr);
 }
 
-static void d3d9ReleaseAppSurface(D3D9Renderer* dr);
+static bool d3d9BindTarget(D3D9Renderer* dr, int32_t id);
+static void d3d9FreeSurfaces(D3D9Renderer* dr);
 static void d3d9LoadUserShaders(D3D9Renderer* dr, DataWin* dw);
 static void d3d9ReleaseUserShaders(D3D9Renderer* dr);
 
@@ -195,23 +219,6 @@ static void d3d9DrawTextureQuad(D3D9Renderer* dr, void* texture, const float* x,
     dev->SetTexture(0, (IDirect3DBaseTexture9*)texture);
     dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, tri, sizeof(SpriteVertex));
     dr->currentTextureIndex = -1; // next batch rebinds its own texture
-}
-
-// EDRAM holds only the bound target: resolve the game image into appTexture
-// before switching to the back buffer, then clear the letterbox bars.
-static void d3d9LeaveAppSurface(D3D9Renderer* dr) {
-    IDirect3DDevice9* dev = Dev(dr);
-    flushBatch(dr);
-    dev->Resolve(D3DRESOLVE_RENDERTARGET0, NULL, (IDirect3DBaseTexture9*)dr->appTexture,
-                 NULL, 0, 0, NULL, 1.0f, 0, NULL);
-    IDirect3DSurface9* backBuffer = NULL;
-    if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer)) && backBuffer) {
-        dev->SetRenderTarget(0, backBuffer);
-        backBuffer->Release();
-    }
-    dr->onAppSurface = false;
-    d3d9ComputeLetterbox(dr);
-    dev->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
 }
 
 // Default ortho over the whole application surface, as a freshly bound target has.
@@ -524,7 +531,7 @@ static void d3d9Destroy(Renderer* renderer) {
     if (dr->pVertexShader) ((IDirect3DVertexShader9*)dr->pVertexShader)->Release();
     if (dr->pPixelShader) ((IDirect3DPixelShader9*)dr->pPixelShader)->Release();
     if (dr->pVertexDecl) ((IDirect3DVertexDeclaration9*)dr->pVertexDecl)->Release();
-    d3d9ReleaseAppSurface(dr);
+    d3d9FreeSurfaces(dr);
     d3d9ReleaseUserShaders(dr);
     free(dr);
 }
@@ -541,7 +548,7 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     d3d9ComputeLetterbox(dr);
     // On the application surface the game draws at its own resolution;
     // the letterbox is applied once, when the surface is blitted.
-    if (dr->appTarget) {
+    if (d3d9Surface(dr, dr->appSurface)) {
         dr->renderScale = 1.0f;
         dr->renderOffsetX = dr->renderOffsetY = 0.0f;
     }
@@ -571,8 +578,10 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
         return;
     }
     dr->sceneActive = true;
-    dr->onAppSurface = dr->appTarget &&
-        SUCCEEDED(dev->SetRenderTarget(0, (IDirect3DSurface9*)dr->appTarget));
+    dr->boundTarget = -1; // Present leaves the back buffer bound
+    dr->hostDirty = false;
+    dr->hostHasCopy = false;
+    if (d3d9Surface(dr, dr->appSurface)) d3d9BindTarget(dr, dr->appSurface);
 
     // Set shared render state
     dev->SetVertexShader((IDirect3DVertexShader9*)dr->pVertexShader);
@@ -1211,23 +1220,26 @@ static int32_t d3d9CreateSpriteFromSurfaceModern(Renderer* renderer, int32_t sur
 static void d3d9EndFrameInit(Renderer* renderer) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     flushBatch(dr);
-    if (!dr->onAppSurface) return;
-    d3d9LeaveAppSurface(dr);
+    D3D9Surface* app = d3d9Surface(dr, dr->appSurface);
+    if (!app || !dr->sceneActive) return;
+    d3d9BindTarget(dr, -1); // resolves the application surface into its texture
+    IDirect3DDevice9* dev = Dev(dr);
+    // Clear first: the letterbox bars would otherwise show stale EDRAM.
+    dev->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
     Runner* runner = renderer->runner;
     if (runner && runner->usingAppSurface && !runner->appSurfaceAutoDraw) return; // game draws it itself
     float x0 = dr->renderOffsetX, y0 = dr->renderOffsetY;
-    float x1 = x0 + (float)dr->appW * dr->renderScale, y1 = y0 + (float)dr->appH * dr->renderScale;
+    float x1 = x0 + (float)app->w * dr->renderScale, y1 = y0 + (float)app->h * dr->renderScale;
     float xs[4] = { x0, x1, x1, x0 }, ys[4] = { y0, y0, y1, y1 };
     // One smooth upscale of the whole frame avoids uneven point-sampled rows at 1.5x.
-    IDirect3DDevice9* dev = Dev(dr);
     DWORD minFilter = D3DTEXF_POINT, magFilter = D3DTEXF_POINT;
     dev->GetSamplerState(0, D3DSAMP_MINFILTER, &minFilter);
     dev->GetSamplerState(0, D3DSAMP_MAGFILTER, &magFilter);
     dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
     dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE); // the game image is opaque
-    d3d9DrawTextureQuad(dr, dr->appTexture, xs, ys, 0.0f, 0.0f,
-                        (float)dr->appW / dr->appAllocW, (float)dr->appH / dr->appAllocH, 0xFFFFFF, 1.0f);
+    d3d9DrawTextureQuad(dr, app->tex, xs, ys, 0.0f, 0.0f,
+                        (float)app->w / app->allocW, (float)app->h / app->allocH, 0xFFFFFF, 1.0f);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
     dev->SetSamplerState(0, D3DSAMP_MINFILTER, minFilter);
     dev->SetSamplerState(0, D3DSAMP_MAGFILTER, magFilter);
@@ -1236,7 +1248,9 @@ static void d3d9EndFrameInit(Renderer* renderer) {
 // are not implemented here, so the upstream user-surface flip never applies.
 static void d3d9SetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
                                  int32_t portW, int32_t portH, bool renderingToUserSurface) {
-    (void)portW; (void)portH; (void)renderingToUserSurface;
+    (void)portW; (void)portH;
+    // Upstream flips the GUI projection itself when drawing into a user surface.
+    ((D3D9Renderer*)renderer)->hostTargetFlipY = !renderingToUserSurface;
     d3d9ApplyGuiCamera((D3D9Renderer*)renderer, guiW, guiH);
 }
 // GUI/Pre/Post ports arrive in window (back-buffer) pixels. As in upstream
@@ -1255,18 +1269,17 @@ static void d3d9BeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH,
 
     int32_t x, y, w, h;
     D3D9Transform_letterbox(guiW, guiH, portW, portH, &x, &y, &w, &h);
-    if (dr->onAppSurface) { // Draw Pre into the real application surface: fill it
-        x = y = 0; w = dr->appW; h = dr->appH; portX = portY = 0;
+    d3d9BindTarget(dr, targetSurfaceId);
+    D3D9Surface* target = d3d9Surface(dr, targetSurfaceId);
+    if (target) { // surface passes (e.g. Draw Pre into application_surface) fill the surface
+        x = y = 0; w = target->w; h = target->h; portX = portY = 0;
     }
     dr->viewportX = (float)(portX + x);
     dr->viewportY = (float)(portY + y);
     dr->viewportW = (float)w;
     dr->viewportH = (float)h;
-    // Host framebuffer and application_surface are both the back buffer here.
-    // Any other target id is unsupported (setRenderTarget rejects it) and is
-    // drawn like a surface, without the host flip.
-    dr->hostTargetFlipY = targetSurfaceId == RENDER_TARGET_HOST_FRAMEBUFFER ||
-                          targetSurfaceId == APPLICATION_SURFACE_ID;
+    // The GUI camera puts the top at clip -1 on every target (see d3d9_transform.h).
+    dr->hostTargetFlipY = true;
     d3d9ApplyGuiCamera(dr, guiW, guiH);
 }
 static void d3d9EndGUI(Renderer* renderer) {
@@ -1392,28 +1405,33 @@ static void d3d9DrawSpriteTiled(Renderer* renderer, int32_t tpagIndex, float ori
     }
     (void)dr;
 }
-static void d3d9DrawSurfaceTiled(Renderer* renderer, int32_t surfaceID, float x, float y,
-                                float xs, float ys, float roomW, float roomH, uint32_t color, float alpha) {
-    (void)renderer; (void)surfaceID; (void)x; (void)y; (void)xs; (void)ys;
-    (void)roomW; (void)roomH; (void)color; (void)alpha;
-}
 static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, int32_t st,
                             int32_t sw, int32_t sh, float x, float y, float xs, float ys,
                             float angle, uint32_t color, float alpha) {
-    // Only application_surface exists; it can be drawn once resolved (after the
-    // views), not onto itself. User surfaces are not implemented yet.
+    // A surface cannot be drawn onto itself; one never resolved is still empty.
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
-    if (surfaceID != APPLICATION_SURFACE_ID || !dr->appTexture || dr->onAppSurface ||
-        sw <= 0 || sh <= 0) return;
+    D3D9Surface* surf = d3d9Surface(dr, surfaceID);
+    if (!surf || !surf->hasContent || surfaceID == dr->boundTarget || sw <= 0 || sh <= 0) return;
     float px[4] = { 0.0f, sw * xs, sw * xs, 0.0f };
     float py[4] = { 0.0f, 0.0f, sh * ys, sh * ys };
     float rad = angle * (3.14159265f / 180.0f), cs = cosf(rad), sn = sinf(rad);
     float sx[4], sy[4];
     for (int i = 0; i < 4; i++) // rotate about (x, y) like the sprite paths
         transformPoint(dr, x + px[i] * cs - py[i] * sn, y + px[i] * sn + py[i] * cs, &sx[i], &sy[i]);
-    d3d9DrawTextureQuad(dr, dr->appTexture, sx, sy,
-                        (float)sl / dr->appAllocW, (float)st / dr->appAllocH,
-                        (float)(sl + sw) / dr->appAllocW, (float)(st + sh) / dr->appAllocH, color, alpha);
+    d3d9DrawTextureQuad(dr, surf->tex, sx, sy,
+                        (float)sl / surf->allocW, (float)st / surf->allocH,
+                        (float)(sl + sw) / surf->allocW, (float)(st + sh) / surf->allocH, color, alpha);
+}
+static void d3d9DrawSurfaceTiled(Renderer* renderer, int32_t surfaceID, float x, float y,
+                                float xs, float ys, float roomW, float roomH, uint32_t color, float alpha) {
+    D3D9Surface* surf = d3d9Surface((D3D9Renderer*)renderer, surfaceID);
+    if (!surf) return;
+    float stepX = surf->w * fabsf(xs), stepY = surf->h * fabsf(ys);
+    if (stepX < 1.0f || stepY < 1.0f) return;
+    // Tile grid aligned to (x, y), covering the room (draw_surface_tiled).
+    for (float ty = y - ceilf(y / stepY) * stepY; ty < roomH; ty += stepY)
+        for (float tx = x - ceilf(x / stepX) * stepX; tx < roomW; tx += stepX)
+            d3d9DrawSurface(renderer, surfaceID, 0, 0, surf->w, surf->h, tx, ty, xs, ys, 0.0f, color, alpha);
 }
 // draw_surface_general: same surface semantics as drawSurface (called unguarded by the core).
 static void d3d9DrawSurfaceColor(Renderer* renderer, int32_t surfaceID, int32_t sl, int32_t st,
@@ -1500,7 +1518,8 @@ static void d3d9PrimitiveEnd(Renderer* renderer) {
         int32_t page = d3d9TextureHandleToPage(dr, (uint32_t)dr->primitiveTexture);
         IDirect3DBaseTexture9* texture = dr->whiteTexture
             ? (IDirect3DBaseTexture9*)dr->whiteTexture : NULL;
-        if (page >= 0) texture = (IDirect3DBaseTexture9*)dr->textures[page];
+        void* chosen = d3d9TextureForIndex(dr, page);
+        if (chosen) texture = (IDirect3DBaseTexture9*)chosen;
         HRESULT hr = Dev(dr)->SetTexture(0, texture);
         if (SUCCEEDED(hr)) {
             hr = Dev(dr)->DrawPrimitiveUP(type, primitiveCount,
@@ -1515,84 +1534,239 @@ static void d3d9PrimitiveEnd(Renderer* renderer) {
     dr->currentTextureIndex = -1;
 }
 
-// Unsupported surface/shader operations fail explicitly instead of dispatching
-// through a mismatched function pointer. These are capability gaps, not success.
-static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h) { (void)r; (void)w; (void)h; return -1; }
-static bool d3d9SurfaceExists(Renderer* r, int32_t id) {
-    (void)r;
-    // The application surface is represented by the host framebuffer on this
-    // backend; user-created offscreen surfaces are not implemented.
-    return id == APPLICATION_SURFACE_ID;
+// ===[ Surfaces ]===
+// Every surface (application_surface included) is an EDRAM render target plus a
+// texture it is resolved into (design after Butterscotch360-Next's notes).
+// EDRAM only holds the bound target, so d3d9BindTarget resolves the target it
+// leaves and redraws the last contents of the one it enters.
+
+static bool d3d9CreateSurfaceObjects(D3D9Renderer* dr, D3D9Surface* s, int32_t w, int32_t h) {
+    IDirect3DDevice9* dev = Dev(dr);
+    int32_t allocW = (w + 7) & ~7, allocH = (h + 7) & ~7; // same alignment as the Refresh hotfix
+    IDirect3DTexture9* tex = NULL;
+    IDirect3DSurface9* rt = NULL;
+    // shortcut: targets larger than EDRAM (10 MB) fail here; predicated tiling would lift that.
+    HRESULT hr = dev->CreateTexture((UINT)allocW, (UINT)allocH, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, NULL);
+    if (SUCCEEDED(hr) && tex)
+        hr = dev->CreateRenderTarget((UINT)allocW, (UINT)allocH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &rt, NULL);
+    if (FAILED(hr) || !tex || !rt) {
+        logWarn("D3D9: surface %dx%d unavailable (hr=0x%08X)\n", w, h, (unsigned)hr);
+        if (tex) tex->Release();
+        if (rt) rt->Release();
+        return false;
+    }
+    s->tex = tex;
+    s->rt = rt;
+    s->w = w;
+    s->h = h;
+    s->allocW = allocW;
+    s->allocH = allocH;
+    s->exists = true;
+    s->hasContent = false;
+    return true;
 }
-static bool d3d9SetRenderTarget(Renderer* r, int32_t id, bool implicit) {
-    if (id != APPLICATION_SURFACE_ID && id != RENDER_TARGET_HOST_FRAMEBUFFER) return false;
-    D3D9Renderer* dr = (D3D9Renderer*)r;
+
+static void d3d9ReleaseSurfaceObjects(D3D9Renderer* dr, D3D9Surface* s) {
+    if (s->tex || s->rt) {
+        if (dr->sceneActive) { // the GPU may still sample it: Xenon does not track lifetimes
+            flushBatch(dr);
+            Dev(dr)->BlockUntilIdle();
+        }
+        if (s->rt) ((IDirect3DSurface9*)s->rt)->Release();
+        if (s->tex) ((IDirect3DTexture9*)s->tex)->Release();
+    }
+    memset(s, 0, sizeof(*s));
+}
+
+static void d3d9FreeSurfaces(D3D9Renderer* dr) {
+    D3D9Surface* s = (D3D9Surface*)dr->surfaces;
+    for (int32_t i = 0; i < (int32_t)arrlen(s); i++) d3d9ReleaseSurfaceObjects(dr, &s[i]);
+    arrfree(s);
+    dr->surfaces = NULL;
+    if (dr->hostCopy) ((IDirect3DTexture9*)dr->hostCopy)->Release();
+    dr->hostCopy = NULL;
+}
+
+// Opaque copy of a texture region onto the bound target at pixel (dx, dy), with
+// the default shader and full colour writes (restores and surface_copy).
+static void d3d9BlitTexture(D3D9Renderer* dr, void* tex, int32_t allocW, int32_t allocH,
+                            int32_t sx, int32_t sy, int32_t w, int32_t h, float dx, float dy) {
+    IDirect3DDevice9* dev = Dev(dr);
+    DWORD blend = TRUE, colorWrite = 0xF;
+    dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+    dev->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
+    IDirect3DPixelShader9* shader = NULL;
+    dev->GetPixelShader(&shader);
     flushBatch(dr);
-    if (id != APPLICATION_SURFACE_ID) return true;
-    d3d9ResetToGameArea(dr);
-    // Like upstream glSetRenderTarget: surface_reset_target back to the
-    // application surface restores the current view's camera.
-    if (implicit && r->runner) {
-        Runner* runner = r->runner;
-        r->cameraCurrent = runner->views[runner->viewsEnabled ? runner->viewCurrent : 0].cameraId;
-        GMLCamera* camera = Runner_getCameraById(runner, r->cameraCurrent);
-        if (camera) d3d9SetProjection(dr, &camera->viewMatrix, &camera->projectionMatrix);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+    dev->SetPixelShader((IDirect3DPixelShader9*)dr->pPixelShader);
+    float xs[4] = { dx, dx + w, dx + w, dx }, ys[4] = { dy, dy, dy + h, dy + h };
+    d3d9DrawTextureQuad(dr, tex, xs, ys, (float)sx / allocW, (float)sy / allocH,
+                        (float)(sx + w) / allocW, (float)(sy + h) / allocH, 0xFFFFFF, 1.0f);
+    dev->SetPixelShader(shader);
+    if (shader) shader->Release();
+    dev->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, blend);
+}
+
+// Switches the render target: id >= 0 is a surface, -1 the back buffer.
+static bool d3d9BindTarget(D3D9Renderer* dr, int32_t id) {
+    D3D9Surface* next = d3d9Surface(dr, id);
+    if (id != -1 && !next) return false;
+    if (id == dr->boundTarget) return true;
+    if (!dr->sceneActive) return false;
+    IDirect3DDevice9* dev = Dev(dr);
+    flushBatch(dr);
+    int32_t hostW = (dr->windowW + 7) & ~7, hostH = (dr->windowH + 7) & ~7;
+    D3D9Surface* current = d3d9Surface(dr, dr->boundTarget);
+    if (current) {
+        dev->Resolve(D3DRESOLVE_RENDERTARGET0, NULL, (IDirect3DBaseTexture9*)current->tex,
+                     NULL, 0, 0, NULL, 1.0f, 0, NULL);
+        current->hasContent = true;
+    } else if (dr->boundTarget == -1 && dr->hostDirty) { // e.g. surface drawing inside Draw GUI
+        if (!dr->hostCopy)
+            dev->CreateTexture((UINT)hostW, (UINT)hostH, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                               (IDirect3DTexture9**)&dr->hostCopy, NULL);
+        if (dr->hostCopy) {
+            dev->Resolve(D3DRESOLVE_RENDERTARGET0, NULL, (IDirect3DBaseTexture9*)dr->hostCopy,
+                         NULL, 0, 0, NULL, 1.0f, 0, NULL);
+            dr->hostHasCopy = true;
+        }
+    }
+    if (next) {
+        dev->SetRenderTarget(0, (IDirect3DSurface9*)next->rt);
+    } else {
+        IDirect3DSurface9* backBuffer = NULL;
+        if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer)) && backBuffer) {
+            dev->SetRenderTarget(0, backBuffer);
+            backBuffer->Release();
+        }
+    }
+    dr->boundTarget = id;
+    if (next) { // surfaces are drawn at their own resolution; only the back buffer is letterboxed
+        dr->renderScale = 1.0f;
+        dr->renderOffsetX = dr->renderOffsetY = 0.0f;
+        if (next->hasContent)
+            d3d9BlitTexture(dr, next->tex, next->allocW, next->allocH, 0, 0, next->w, next->h, 0.0f, 0.0f);
+    } else {
+        d3d9ComputeLetterbox(dr);
+        dr->hostDirty = true;
+        if (dr->hostHasCopy)
+            d3d9BlitTexture(dr, dr->hostCopy, hostW, hostH, 0, 0, dr->windowW, dr->windowH, 0.0f, 0.0f);
     }
     return true;
 }
-static void d3d9ReleaseAppSurface(D3D9Renderer* dr) {
-    if (dr->appTarget) ((IDirect3DSurface9*)dr->appTarget)->Release();
-    if (dr->appTexture) ((IDirect3DTexture9*)dr->appTexture)->Release();
-    dr->appTarget = dr->appTexture = NULL;
-    dr->appW = dr->appH = 0;
-}
 
-// Called by Runner_beginFrame before beginFrame. On failure the backend keeps
-// drawing straight to the back buffer (the old behaviour) instead of failing.
+static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return -1;
+    D3D9Surface* s = (D3D9Surface*)dr->surfaces;
+    int32_t id = 0;
+    while (id < (int32_t)arrlen(s) && s[id].exists) id++;
+    if (id == (int32_t)arrlen(s)) {
+        D3D9Surface blank;
+        memset(&blank, 0, sizeof(blank));
+        arrput(s, blank);
+        dr->surfaces = s;
+    }
+    return d3d9CreateSurfaceObjects(dr, &s[id], w, h) ? id : -1;
+}
+static bool d3d9SurfaceExists(Renderer* r, int32_t id) {
+    return d3d9Surface((D3D9Renderer*)r, id) != NULL;
+}
+static bool d3d9SetRenderTarget(Renderer* r, int32_t id, bool implicit) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    if (!d3d9BindTarget(dr, id)) return false;
+    D3D9Surface* surf = d3d9Surface(dr, id);
+    if (!surf) return true; // the back buffer: GUI passes re-apply their camera via beginGUI
+    // Like upstream glSetRenderTarget: the view's own surface (or the application
+    // surface on an implicit restore) uses the view camera, others the full surface.
+    dr->hostTargetFlipY = false;
+    d3d9SetGameViewport(dr, 0.0f, 0.0f, (float)surf->w, (float)surf->h);
+    Runner* runner = r->runner;
+    RuntimeView* view = runner ? &runner->views[runner->viewsEnabled ? runner->viewCurrent : 0] : NULL;
+    GMLCamera* camera = NULL;
+    if (view && ((implicit && id == dr->appSurface) || id == view->surfaceId)) {
+        r->cameraCurrent = view->cameraId;
+        camera = Runner_getCameraById(runner, view->cameraId);
+    }
+    if (camera) {
+        d3d9SetProjection(dr, &camera->viewMatrix, &camera->projectionMatrix);
+        return true;
+    }
+    Matrix4f viewMatrix, projection;
+    Matrix4f_identity(&viewMatrix);
+    Matrix4f_viewProjection(&projection, 0.0f, 0.0f, (float)surf->w, (float)surf->h, 0.0f);
+    r->cameraCurrent = SURFACE_CAMERA;
+    if (runner) {
+        GMLCamera* sc = &runner->surfaceCamera;
+        sc->allocated = true;
+        sc->viewX = sc->viewY = 0.0f;
+        sc->viewWidth = surf->w;
+        sc->viewHeight = surf->h;
+        sc->viewAngle = 0.0f;
+        sc->objectId = -1;
+        sc->viewMatrix = viewMatrix;
+        sc->projectionMatrix = projection;
+    }
+    d3d9SetProjection(dr, &viewMatrix, &projection);
+    return true;
+}
+// Called by Runner_beginFrame before beginFrame. application_surface is an
+// ordinary surface id; if it cannot be created the game draws to the back buffer.
 static int32_t d3d9EnsureApplicationSurface(Renderer* r, int32_t w, int32_t h) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
-    if (w <= 0 || h <= 0) return -1;
-    if (dr->appTarget && dr->appW == w && dr->appH == h) return APPLICATION_SURFACE_ID;
-    d3d9ReleaseAppSurface(dr);
-    IDirect3DDevice9* dev = Dev(dr);
-    if (!dev) return APPLICATION_SURFACE_ID;
-    int32_t allocW = (w + 7) & ~7, allocH = (h + 7) & ~7; // same alignment as the Refresh hotfix
-    IDirect3DTexture9* texture = NULL;
-    IDirect3DSurface9* target = NULL;
-    HRESULT hr = dev->CreateTexture((UINT)allocW, (UINT)allocH, 1, 0, D3DFMT_A8R8G8B8,
-                                    D3DPOOL_DEFAULT, &texture, NULL);
-    if (SUCCEEDED(hr) && texture)
-        hr = dev->CreateRenderTarget((UINT)allocW, (UINT)allocH, D3DFMT_A8R8G8B8,
-                                     D3DMULTISAMPLE_NONE, 0, FALSE, &target, NULL);
-    if (FAILED(hr) || !texture || !target) {
-        logWarn("D3D9: application_surface %dx%d unavailable (hr=0x%08X); drawing to the back buffer\n",
-                w, h, (unsigned)hr);
-        if (texture) texture->Release();
-        if (target) target->Release();
-        return APPLICATION_SURFACE_ID;
+    D3D9Surface* app = d3d9Surface(dr, dr->appSurface);
+    if (w <= 0 || h <= 0 || (app && app->w == w && app->h == h)) return dr->appSurface;
+    if (app) {
+        d3d9ReleaseSurfaceObjects(dr, app);
+        if (!d3d9CreateSurfaceObjects(dr, app, w, h)) dr->appSurface = -1;
+    } else {
+        dr->appSurface = d3d9CreateSurface(r, w, h);
     }
-    dr->appTexture = texture;
-    dr->appTarget = target;
-    dr->appW = w;
-    dr->appH = h;
-    dr->appAllocW = allocW;
-    dr->appAllocH = allocH;
-    logInfo("D3D9: application_surface %dx%d\n", w, h);
-    return APPLICATION_SURFACE_ID;
+    if (dr->appSurface >= 0) logInfo("D3D9: application_surface %dx%d (surface %d)\n", w, h, dr->appSurface);
+    return dr->appSurface;
 }
 static float d3d9GetSurfaceWidth(Renderer* r, int32_t id) {
-    if (id != APPLICATION_SURFACE_ID) return 0.0f;
-    return (float)((D3D9Renderer*)r)->gameW;
+    D3D9Surface* s = d3d9Surface((D3D9Renderer*)r, id);
+    return s ? (float)s->w : 0.0f;
 }
 static float d3d9GetSurfaceHeight(Renderer* r, int32_t id) {
-    if (id != APPLICATION_SURFACE_ID) return 0.0f;
-    return (float)((D3D9Renderer*)r)->gameH;
+    D3D9Surface* s = d3d9Surface((D3D9Renderer*)r, id);
+    return s ? (float)s->h : 0.0f;
 }
-static void d3d9SurfaceResize(Renderer* r, int32_t id, int32_t w, int32_t h) { (void)r; (void)id; (void)w; (void)h; }
-static void d3d9SurfaceFree(Renderer* r, int32_t id) { (void)r; (void)id; }
-static void d3d9SurfaceCopy(Renderer* r, int32_t d, int32_t dx, int32_t dy, int32_t src, int32_t sx, int32_t sy, int32_t w, int32_t h, bool part) {
-    (void)r; (void)d; (void)dx; (void)dy; (void)src; (void)sx; (void)sy; (void)w; (void)h; (void)part;
+static void d3d9SurfaceResize(Renderer* r, int32_t id, int32_t w, int32_t h) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    D3D9Surface* s = d3d9Surface(dr, id);
+    // shortcut: a surface cannot be resized while it is the bound target.
+    if (!s || w <= 0 || h <= 0 || (s->w == w && s->h == h) || id == dr->boundTarget) return;
+    d3d9ReleaseSurfaceObjects(dr, s);
+    d3d9CreateSurfaceObjects(dr, s, w, h); // contents are lost, as in GameMaker
 }
+static void d3d9SurfaceFree(Renderer* r, int32_t id) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    D3D9Surface* s = d3d9Surface(dr, id);
+    if (!s) return;
+    if (id == dr->boundTarget) d3d9BindTarget(dr, -1);
+    d3d9ReleaseSurfaceObjects(dr, s);
+    if (id == dr->appSurface) dr->appSurface = -1;
+}
+// surface_copy / surface_copy_part: opaque copy of src's contents into dest.
+static void d3d9SurfaceCopy(Renderer* r, int32_t dest, int32_t dx, int32_t dy, int32_t src,
+                            int32_t sx, int32_t sy, int32_t w, int32_t h, bool part) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    D3D9Surface* from = d3d9Surface(dr, src);
+    if (!from || dest == src || !d3d9Surface(dr, dest)) return;
+    int32_t previous = dr->boundTarget;
+    if (!d3d9BindTarget(dr, dest)) return; // also resolves `src` if it was bound
+    if (!part) { sx = sy = 0; w = from->w; h = from->h; }
+    if (from->hasContent && w > 0 && h > 0)
+        d3d9BlitTexture(dr, from->tex, from->allocW, from->allocH, sx, sy, w, h, (float)dx, (float)dy);
+    d3d9BindTarget(dr, previous);
+}
+// shortcut: no CPU readback (surface_getpixel, buffer_get_surface); resolved
+// textures are tiled in Xenon memory and would need XGUntileSurface.
 static bool d3d9SurfaceGetPixels(Renderer* r, int32_t id, uint8_t* rgba) { (void)r; (void)id; (void)rgba; return false; }
 static uint32_t d3d9SpriteGetTexture(Renderer* r, int32_t tpagIndex) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
@@ -1602,8 +1776,14 @@ static uint32_t d3d9SpriteGetTexture(Renderer* r, int32_t tpagIndex) {
     if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page)) return 0;
     return (uint32_t)tpagIndex + 1;
 }
-static uint32_t d3d9SurfaceGetTexture(Renderer* r, int32_t i) { (void)r; (void)i; return 0; }
+static uint32_t d3d9SurfaceGetTexture(Renderer* r, int32_t i) {
+    return d3d9Surface((D3D9Renderer*)r, i) ? D3D9_SURFACE_HANDLE + (uint32_t)i : 0;
+}
 static float d3d9TextureGetTexelWidth(Renderer* r, uint32_t texID) {
+    if (texID >= D3D9_SURFACE_HANDLE) {
+        D3D9Surface* surf = d3d9Surface((D3D9Renderer*)r, (int32_t)(texID - D3D9_SURFACE_HANDLE));
+        return surf ? 1.0f / (float)surf->allocW : 0.0f;
+    }
     DataWin* dw = r->dataWin;
     if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
     D3D9Renderer* dr = (D3D9Renderer*)r;
@@ -1612,6 +1792,10 @@ static float d3d9TextureGetTexelWidth(Renderer* r, uint32_t texID) {
     return 1.0f / (float)dr->textureWidths[page];
 }
 static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
+    if (texID >= D3D9_SURFACE_HANDLE) {
+        D3D9Surface* surf = d3d9Surface((D3D9Renderer*)r, (int32_t)(texID - D3D9_SURFACE_HANDLE));
+        return surf ? 1.0f / (float)surf->allocH : 0.0f;
+    }
     DataWin* dw = r->dataWin;
     if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
     D3D9Renderer* dr = (D3D9Renderer*)r;
@@ -1620,6 +1804,14 @@ static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
     return 1.0f / (float)dr->textureHeights[page];
 }
 static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
+    if (texID >= D3D9_SURFACE_HANDLE) {
+        D3D9Surface* surf = d3d9Surface((D3D9Renderer*)r, (int32_t)(texID - D3D9_SURFACE_HANDLE));
+        if (!surf || !uv) return false;
+        uv[0] = uv[1] = 0.0f;
+        uv[2] = (float)surf->w / surf->allocW;
+        uv[3] = (float)surf->h / surf->allocH;
+        return true;
+    }
     DataWin* dw = r->dataWin;
     if (!dw || !uv || texID == 0 || texID - 1 >= dw->tpag.count) return false;
     D3D9Renderer* dr = (D3D9Renderer*)r;
@@ -1640,7 +1832,7 @@ static void d3d9TextureSetStage(Renderer* r, int32_t slot, uint32_t texID) {
         flushBatch(dr);
         int32_t page = d3d9TextureHandleToPage(dr, texID);
         IDirect3DDevice9* dev = Dev(dr);
-        dev->SetTexture(slot, page >= 0 ? (IDirect3DBaseTexture9*)dr->textures[page] : NULL);
+        dev->SetTexture(slot, page != -1 ? (IDirect3DBaseTexture9*)d3d9TextureForIndex(dr, page) : NULL);
         dev->SetSamplerState(slot, D3DSAMP_MINFILTER, D3DTEXF_POINT);
         dev->SetSamplerState(slot, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
         dev->SetSamplerState(slot, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
@@ -2013,6 +2205,8 @@ Renderer* D3D9Renderer_create(void* pd3dDevice) {
     dr->base.drawColor = 0xFFFFFF;
     dr->base.drawAlpha = 1.0f;
     dr->base.drawFont = -1;
+    dr->appSurface = -1;
+    dr->boundTarget = -1;
     dr->pd3dDevice = pd3dDevice;
     dr->currentTextureIndex = -1;
     return (Renderer*)dr;

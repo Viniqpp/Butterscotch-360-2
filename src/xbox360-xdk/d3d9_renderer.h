@@ -71,12 +71,14 @@ typedef struct {
     float renderOffsetY;
     int32_t windowW, windowH;
 
-    // Real application_surface: a game-resolution EDRAM render target that is
-    // resolved into appTexture and scaled to the back buffer once per frame.
-    void* appTarget;  // IDirect3DSurface9*; NULL = draw straight to the back buffer
-    void* appTexture; // IDirect3DTexture9*
-    int32_t appW, appH, appAllocW, appAllocH;
-    bool onAppSurface; // appTarget is the bound render target
+    // Surfaces (application_surface included): an EDRAM render target plus
+    // the texture it is resolved into, per surface id.
+    void* surfaces;      // stb_ds array of D3D9Surface
+    int32_t appSurface;  // id of application_surface, -1 = draw to the back buffer
+    int32_t boundTarget; // surface id being drawn to, -1 = back buffer
+    void* hostCopy;      // IDirect3DTexture9*: back buffer kept while a surface is bound mid-frame
+    bool hostDirty;      // back buffer drawn to this frame
+    bool hostHasCopy;
 
     // GameMaker shaders, precompiled offline (tools/xdk/translate_shaders.py)
     // into game:\shaders\<name>.xps; NULL entries fall back to the default shader.
