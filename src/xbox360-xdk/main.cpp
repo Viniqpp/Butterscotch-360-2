@@ -447,6 +447,8 @@ VOID __cdecl main() {
         return;
     }
     double accumulator = 0.0;
+    double perfStepMs = 0.0, perfDrawMs = 0.0, perfPresentMs = 0.0;
+    int perfFrames = 0, perfSteps = 0;
 
     while (!runner->shouldExit) {
         if (!QueryPerformanceCounter(&currentTime)) {
@@ -501,6 +503,7 @@ VOID __cdecl main() {
         if (speedCapRemoved && targetFrameTime > accumulator) accumulator = targetFrameTime;
 
         int gameFramesRan = 0;
+        double perfT0 = _xdk_monotonic_ms();
         while (accumulator >= targetFrameTime && !runner->shouldExit) {
             if (gameFramesRan > 0) RunnerKeyboard_beginFrame(runner->keyboard);
             updateNativeGamepad(runner, &state.Gamepad, controllerConnected);
@@ -508,6 +511,9 @@ VOID __cdecl main() {
             accumulator -= targetFrameTime;
             gameFramesRan++;
         }
+        double perfT1 = _xdk_monotonic_ms();
+        perfStepMs += perfT1 - perfT0;
+        perfSteps += gameFramesRan;
 
         // Render once after catch-up steps. This follows the modern renderer lifecycle:
         // draw-pre -> application surface/views -> draw-post -> GUI -> present.
@@ -532,7 +538,18 @@ VOID __cdecl main() {
             Runner_drawPost(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
             renderer->vtable->endFrameEnd(renderer);
             Runner_drawGUI(runner, SCREEN_WIDTH, SCREEN_HEIGHT, gameW, gameH);
+            double perfT2 = _xdk_monotonic_ms();
             platformSwapBuffers((D3D9Renderer*)renderer);
+            double perfT3 = _xdk_monotonic_ms();
+            perfDrawMs += perfT2 - perfT1;
+            perfPresentMs += perfT3 - perfT2;
+            // Every 60 rendered frames: where the time goes (game logic vs CPU draw vs GPU present).
+            if (++perfFrames == 60) {
+                xdkLog("BS perf: per frame step=%.1fms (%d steps) draw=%.1fms present=%.1fms\n",
+                       perfStepMs / 60.0, perfSteps, perfDrawMs / 60.0, perfPresentMs / 60.0);
+                perfStepMs = perfDrawMs = perfPresentMs = 0.0;
+                perfFrames = perfSteps = 0;
+            }
 
             Runner_handlePendingRoomChange(runner);
             RunnerKeyboard_beginFrame(runner->keyboard);

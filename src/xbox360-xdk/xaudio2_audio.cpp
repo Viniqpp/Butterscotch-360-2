@@ -364,10 +364,6 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
         return -1;
     }
 
-    if (sound) {
-        logInfo("BS: playSound idx=%d name=%s flags=0x%x audioFile=%d\n",
-            soundIndex, sound->name ? sound->name : "?", (unsigned)sound->flags, sound->audioFile);
-    }
 
     uint8_t* oggData = NULL;
     int oggSize = 0;
@@ -560,7 +556,6 @@ static int32_t xdkPlaySound(AudioSystem* audio, int32_t soundIndex, int32_t prio
             uint16_t value = (uint16_t)pcm[sample];
             pcm[sample] = (short)((value >> 8) | (value << 8));
         }
-        logInfo("BS: WAV: ch=%d rate=%d samples=%d\n", channels, sampleRate, sampleCount);
     } else {
         int stbErr = 0;
         stb_vorbis* vorbis = stb_vorbis_open_memory(oggData, oggSize, &stbErr, NULL);
