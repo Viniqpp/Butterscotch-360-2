@@ -67,8 +67,8 @@ double _xdk_monotonic_ms(void) {
 }
 
 // Screen dimensions (720p native)
-#define SCREEN_WIDTH  1280
-#define SCREEN_HEIGHT 720
+static int SCREEN_WIDTH = 1280; // replaced by the console's video mode in main()
+static int SCREEN_HEIGHT = 720;
 
 // ===[ Controller Mapping ]===
 
@@ -221,6 +221,14 @@ static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
 
 VOID __cdecl main() {
     xdkLog("BS: main() entered\n");
+
+    XVIDEO_MODE videoMode;
+    XGetVideoMode(&videoMode); // render at the dashboard's output resolution
+    if (videoMode.dwDisplayWidth > 0 && videoMode.dwDisplayHeight > 0) {
+        SCREEN_WIDTH = (int)videoMode.dwDisplayWidth;
+        SCREEN_HEIGHT = (int)videoMode.dwDisplayHeight;
+    }
+    xdkLog("BS: video mode %dx%d\n", SCREEN_WIDTH, SCREEN_HEIGHT);
 
     IDirect3D9* pD3D = Direct3DCreate9(D3D_SDK_VERSION);
     if (!pD3D) { xdkLog("BS: FATAL: D3D create failed\n"); return; }
