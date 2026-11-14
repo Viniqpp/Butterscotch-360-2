@@ -1,4 +1,5 @@
 build-xbox360-xdk/
+dist/
 Debug/
 Release/
 .gitignore

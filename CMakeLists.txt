@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
 
+# Xbox 360 XDK: no host compiler is used; see cmake/xbox360-xdk.cmake.
+if(PLATFORM STREQUAL "xbox360-xdk")
+    project(butterscotch_xdk NONE)
+    include(cmake/xbox360-xdk.cmake)
+    return()
+endif()
+
 if(PLATFORM STREQUAL "ps3")
     set(CMAKE_TOOLCHAIN_FILE ${CMAKE_SOURCE_DIR}/cmake/ppu.cmake)
 endif()

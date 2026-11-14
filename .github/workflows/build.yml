@@ -20,6 +20,14 @@ jobs:
       - name: Install build tools
         run: sudo apt-get update && sudo apt-get install -y cmake
 
+      - name: Check XDK backend sources (source-level, not an XDK build)
+        run: python3 tools/xdk/check_xdk_sources.py
+
+      - name: Test XDK renderer transform math (host, not an XDK build)
+        run: |
+          gcc -std=c99 -Wall -Wextra -Isrc tools/xdk/test_d3d9_transform.c -lm -o test_d3d9_transform
+          ./test_d3d9_transform
+
       - name: Configure
         run: >
           cmake -S . -B build
