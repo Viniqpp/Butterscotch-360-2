@@ -4,6 +4,13 @@
 
 #pragma once
 
+// Pull the XDK headers in at global C++ scope first. Later <windows.h> includes
+// (via the xtl.h shim) can sit inside extern "C" blocks such as bzlib.h's,
+// where xtl.h's templates fail with C2894.
+#ifdef _XBOX
+#include <xtl.h>
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>

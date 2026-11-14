@@ -4986,7 +4986,11 @@ static RValue builtin_environment_get_variable(MAYBE_UNUSED VMContext* ctx, RVal
     char* name = RValue_toString(args[0], ctx->runner->dataWin);
     if (name == nullptr) return RValue_makeOwnedString(safeStrdup(""));
 
+#ifdef _XBOX
+    const char* value = nullptr; // the Xbox 360 CRT has no getenv
+#else
     const char* value = getenv(name);
+#endif
     free(name);
 
     if (value == nullptr) {
@@ -8021,32 +8025,32 @@ static void registerFmodBuiltins(VMContext* ctx) {
         const char* symbol;
         BuiltinFunc function;
     } bindings[] = {
-        {"fmod_init", "FMOD_Init", builtin_fmod_init},
-        {"fmod_destroy", "FMOD_Destroy", builtin_fmod_destroy},
-        {"fmod_bank_load", "FMOD_Bank_Load", builtin_fmod_bank_load},
-        {"fmod_event_load", "FMOD_Event_Load", builtin_fmod_event_load},
-        {"fmod_update", "FMOD_Update", builtin_fmod_update},
-        {"fmod_event_create_instance", "FMOD_Event_CreateInstance", builtin_fmod_event_create_instance},
-        {"fmod_event_instance_play", "FMOD_EventInstance_Play", builtin_fmod_event_instance_play},
-        {"fmod_event_instance_stop", "FMOD_EventInstance_Stop", builtin_fmod_event_instance_stop},
-        {"fmod_event_instance_release", "FMOD_EventInstance_Release", builtin_fmod_event_instance_release},
-        {"fmod_event_instance_set_3d_attributes", "FMOD_EventInstance_Set3DAttributes", builtin_fmod_event_instance_set_3d_attributes},
-        {"fmod_set_listener_attributes", "FMOD_SetListenerAttributes", builtin_fmod_set_listener_attributes},
-        {"fmod_set_num_listeners", "FMOD_SetNumListeners", builtin_fmod_set_num_listeners},
-        {"fmod_event_instance_set_parameter", "FMOD_EventInstance_SetParameter", builtin_fmod_event_instance_set_parameter},
-        {"fmod_event_instance_get_parameter", "FMOD_EventInstance_GetParameter", builtin_fmod_event_instance_get_parameter},
-        {"fmod_set_parameter", "FMOD_SetParameter", builtin_fmod_set_parameter},
-        {"fmod_get_parameter", "FMOD_GetParameter", builtin_fmod_get_parameter},
-        {"fmod_event_instance_set_paused", "FMOD_EventInstance_SetPaused", builtin_fmod_event_instance_set_paused},
-        {"fmod_event_instance_get_paused", "FMOD_EventInstance_GetPaused", builtin_fmod_event_instance_get_paused},
-        {"fmod_event_instance_set_paused_all", "FMOD_EventInstance_SetPaused_All", builtin_fmod_event_instance_set_paused_all},
-        {"fmod_event_one_shot", "FMOD_Event_OneShot", builtin_fmod_event_one_shot},
-        {"fmod_event_one_shot_3d", "FMOD_Event_OneShot_3D", builtin_fmod_event_one_shot_3d},
-        {"fmod_event_instance_is_playing", "FMOD_EventInstance_IsPlaying", builtin_fmod_event_instance_is_playing},
-        {"fmod_event_instance_get_timeline_pos", "FMOD_EventInstance_GetTimelinePosition", builtin_fmod_event_instance_get_timeline_pos},
-        {"fmod_event_instance_set_timeline_pos", "FMOD_EventInstance_SetTimelinePosition", builtin_fmod_event_instance_set_timeline_pos},
-        {"fmod_bank_load_sample_data", "FMOD_Bank_LoadSampleData", builtin_fmod_bank_load_sample_data},
-        {"fmod_event_get_length", "FMOD_Event_GetLength", builtin_fmod_event_get_length},
+        {"fmod_init", "FMOD_Init", BUILTIN_FUNC(builtin_fmod_init)},
+        {"fmod_destroy", "FMOD_Destroy", BUILTIN_FUNC(builtin_fmod_destroy)},
+        {"fmod_bank_load", "FMOD_Bank_Load", BUILTIN_FUNC(builtin_fmod_bank_load)},
+        {"fmod_event_load", "FMOD_Event_Load", BUILTIN_FUNC(builtin_fmod_event_load)},
+        {"fmod_update", "FMOD_Update", BUILTIN_FUNC(builtin_fmod_update)},
+        {"fmod_event_create_instance", "FMOD_Event_CreateInstance", BUILTIN_FUNC(builtin_fmod_event_create_instance)},
+        {"fmod_event_instance_play", "FMOD_EventInstance_Play", BUILTIN_FUNC(builtin_fmod_event_instance_play)},
+        {"fmod_event_instance_stop", "FMOD_EventInstance_Stop", BUILTIN_FUNC(builtin_fmod_event_instance_stop)},
+        {"fmod_event_instance_release", "FMOD_EventInstance_Release", BUILTIN_FUNC(builtin_fmod_event_instance_release)},
+        {"fmod_event_instance_set_3d_attributes", "FMOD_EventInstance_Set3DAttributes", BUILTIN_FUNC(builtin_fmod_event_instance_set_3d_attributes)},
+        {"fmod_set_listener_attributes", "FMOD_SetListenerAttributes", BUILTIN_FUNC(builtin_fmod_set_listener_attributes)},
+        {"fmod_set_num_listeners", "FMOD_SetNumListeners", BUILTIN_FUNC(builtin_fmod_set_num_listeners)},
+        {"fmod_event_instance_set_parameter", "FMOD_EventInstance_SetParameter", BUILTIN_FUNC(builtin_fmod_event_instance_set_parameter)},
+        {"fmod_event_instance_get_parameter", "FMOD_EventInstance_GetParameter", BUILTIN_FUNC(builtin_fmod_event_instance_get_parameter)},
+        {"fmod_set_parameter", "FMOD_SetParameter", BUILTIN_FUNC(builtin_fmod_set_parameter)},
+        {"fmod_get_parameter", "FMOD_GetParameter", BUILTIN_FUNC(builtin_fmod_get_parameter)},
+        {"fmod_event_instance_set_paused", "FMOD_EventInstance_SetPaused", BUILTIN_FUNC(builtin_fmod_event_instance_set_paused)},
+        {"fmod_event_instance_get_paused", "FMOD_EventInstance_GetPaused", BUILTIN_FUNC(builtin_fmod_event_instance_get_paused)},
+        {"fmod_event_instance_set_paused_all", "FMOD_EventInstance_SetPaused_All", BUILTIN_FUNC(builtin_fmod_event_instance_set_paused_all)},
+        {"fmod_event_one_shot", "FMOD_Event_OneShot", BUILTIN_FUNC(builtin_fmod_event_one_shot)},
+        {"fmod_event_one_shot_3d", "FMOD_Event_OneShot_3D", BUILTIN_FUNC(builtin_fmod_event_one_shot_3d)},
+        {"fmod_event_instance_is_playing", "FMOD_EventInstance_IsPlaying", BUILTIN_FUNC(builtin_fmod_event_instance_is_playing)},
+        {"fmod_event_instance_get_timeline_pos", "FMOD_EventInstance_GetTimelinePosition", BUILTIN_FUNC(builtin_fmod_event_instance_get_timeline_pos)},
+        {"fmod_event_instance_set_timeline_pos", "FMOD_EventInstance_SetTimelinePosition", BUILTIN_FUNC(builtin_fmod_event_instance_set_timeline_pos)},
+        {"fmod_bank_load_sample_data", "FMOD_Bank_LoadSampleData", BUILTIN_FUNC(builtin_fmod_bank_load_sample_data)},
+        {"fmod_event_get_length", "FMOD_Event_GetLength", BUILTIN_FUNC(builtin_fmod_event_get_length)},
     };
 
     for (size_t i = 0; i < sizeof(bindings) / sizeof(bindings[0]); i++) {

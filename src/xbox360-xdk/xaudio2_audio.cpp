@@ -18,6 +18,7 @@
 
 // Core headers — compiled as C++ alongside the .c files (via /TP flag)
 #include "utils.h"
+#include "stb_ds.h"
 #include "fmod/fmod.h"
 #include "xaudio2_audio.h"
 

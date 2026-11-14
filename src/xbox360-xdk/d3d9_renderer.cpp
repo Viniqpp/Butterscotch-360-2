@@ -915,8 +915,8 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
     float lineHeight = lineSeparation >= 0.0f ? lineSeparation : (float)font->emSize;
 
     // Resolve font texture page
-    int32_t fontTpagIndex = DataWin_resolveTPAG(dw, font->textureOffset);
-    if (0 > fontTpagIndex) return;
+    int32_t fontTpagIndex = font->tpagIndex;
+    if (0 > fontTpagIndex || (uint32_t)fontTpagIndex >= dw->tpag.count) return;
 
     TexturePageItem* fontTpag = &dw->tpag.items[fontTpagIndex];
     int16_t pageId = fontTpag->texturePageId;
@@ -927,9 +927,8 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
     float texH = (float)dr->textureHeights[pageId];
     if (texW <= 0 || texH <= 0) return;
 
-    // Preprocess: convert # to \n (and \# to literal #)
-    char* processed = TextUtils_preprocessGmlText(text);
-    if (!processed) return;
+    // The core already converted GML '#' newlines before calling drawText (as for upstream renderers).
+    const char* processed = text;
     int32_t textLen = (int32_t)strlen(processed);
 
     // Count lines
@@ -1059,7 +1058,6 @@ static void d3d9DrawText(Renderer* renderer, const char* text, float x, float y,
         }
     }
 
-    free(processed);
 }
 
 static void d3d9Flush(Renderer* renderer) {

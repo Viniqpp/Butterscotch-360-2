@@ -19,11 +19,20 @@ extern "C" ULONG __cdecl DbgPrint(const char* format, ...);
 #include "data_win.h"
 #include "json_reader.h"
 #include "utils.h"
+#include "log.h"
 #include "stb_ds.h"
 
 #include "d3d9_renderer.h"
 #include "xaudio2_audio.h"
 #include "xdk_file_system.h"
+
+// The core's log.c forwards every log line to the platform (cli/main.c has the desktop one).
+void platformLog(const logType type, const char* format, va_list va) {
+    char line[1024];
+    vsnprintf(line, sizeof(line), format, va); // compat_msvc.h wrapper: always terminated
+    OutputDebugStringA(type == LOG_TYPE_ERROR ? "BS error: " : type == LOG_TYPE_WARNING ? "BS warning: " : "BS: ");
+    OutputDebugStringA(line);
+}
 
 // ===[ POSIX clock polyfill implementation ]===
 double _xdk_monotonic_ms(void) {

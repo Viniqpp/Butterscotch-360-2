@@ -288,6 +288,9 @@ void VM_registerBuiltin(VMContext* ctx, const char* name, BuiltinFunc func);
 // Some versions of MSVC complain that the functions aren't the right type because of struct bullshit.
 // We guard this behind _MSC_VER to keep type checking on other compilers to find legitimate type mismatch errors.
 #define VM_registerBuiltin(ctx,name,func) VM_registerBuiltin(ctx,name,(BuiltinFunc)func)
+#define BUILTIN_FUNC(func) ((BuiltinFunc)(func))
+#else
+#define BUILTIN_FUNC(func) (func)
 #endif
 BuiltinFunc VM_findBuiltin(VMContext* ctx, const char* name);
 

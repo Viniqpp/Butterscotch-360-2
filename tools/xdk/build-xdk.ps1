@@ -79,14 +79,15 @@ if ($CheckOnly) { exit 0 }
 
 # ---- Build ---------------------------------------------------------------
 $project = if ($Target -eq 'smoke') { "$repo\tools\xdk\smoke\XdkSmoke.vcxproj" } else { "$repo\Butterscotch360.sln" }
-$outDir = if ($Target -eq 'smoke') { "$repo\build-xbox360-xdk\smoke\$Configuration" } else { "$repo\build-xbox360-xdk\$Configuration" }
 $log = "$repo\build-xbox360-xdk\$Target-$Configuration.log"
+# A command-line OutDir is a global property the XDK platform props cannot override.
+$outDir = "$repo\build-xbox360-xdk\$Target\$Configuration\"
 New-Item -ItemType Directory -Force (Split-Path $log) | Out-Null
 
 $env:XEDK = $XdkDir  # the XDK platform props resolve include/lib paths from XEDK
 Write-Host "`nBuilding $Target ($Configuration|Xbox 360) -> log: $log"
 & $MSBuild $project /nologo /m /t:Build "/p:Configuration=$Configuration" "/p:Platform=Xbox 360" `
-    "/p:SolutionDir=$repo\" /fl "/flp:logfile=$log;verbosity=normal"
+    "/p:SolutionDir=$repo\" "/p:OutDir=$outDir" /fl "/flp:logfile=$log;verbosity=normal"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`nBuild FAILED (exit $LASTEXITCODE). First errors:" -ForegroundColor Red
     Select-String -Path $log -Pattern ': (fatal )?error ' | Select-Object -First 15 | ForEach-Object { Write-Host "  $($_.Line.Trim())" }

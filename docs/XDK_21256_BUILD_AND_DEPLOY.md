@@ -9,9 +9,9 @@ Step-by-step for the first real XDK build. Background and licensing notes are in
 |---|---|
 | Source-level checks (`tools/xdk/check_xdk_sources.py`) | Passing. Checks vtable coverage, the `.vcxproj` source list, Debug/Release library lists, include directories and unconditional `#include "..."` resolution. Runs in CI. |
 | Renderer transform math (`tools/xdk/test_d3d9_transform.c`) | Passing on the host. Mutation-checked: breaking the flip, the letterbox or the multiply order makes it fail. Runs in CI. |
-| XDK environment check (`build-xdk.ps1 -CheckOnly`) | Tested only on a machine **without** the XDK, where it correctly reports what is missing. |
+| XDK environment check (`build-xdk.ps1 -CheckOnly`) | Passing with VS2010 + SP1 + XDK 21256.3 installed (and correctly lists what is missing without them). |
+| Xbox 360 XDK compilation / XEX | **Done.** The smoke XEX and the `Release` Butterscotch XEX build with XDK 21256.3 (`_MSC_VER=1600`): 0 errors, no uninitialised-variable or missing-return warnings. `Debug` has not been built. |
 | Host C++ syntax pass of the core | Passing for all 55 `.c` translation units the XDK project compiles. Clang compiles them as C++ with `compat_msvc.h` forced and `_XBOX`/`_WIN32` defined, against MinGW headers. This catches C-only syntax (`goto` past initialisers, designated initialisers, VLAs). It does **not** prove MSVC 2010 compatibility, and the four XDK `.cpp` files were not compiled. |
-| Xbox 360 XDK compilation / XEX | **Not done yet.** No XDK has been installed. |
 | Console execution | **Not done yet.** |
 
 ## 1. One-time setup (Windows PC or VM)

@@ -5,7 +5,12 @@
 #include <limits.h>
 
 #include "utils.h"
+#include "stb_ds.h"
 #include "xdk_file_system.h"
+
+#ifndef INVALID_FILE_ATTRIBUTES
+#define INVALID_FILE_ATTRIBUTES ((DWORD)-1) // Win32 value; not in the XDK headers
+#endif
 
 static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     XdkFileSystem* xfs = (XdkFileSystem*)fs;
