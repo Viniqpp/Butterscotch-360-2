@@ -223,10 +223,10 @@ VOID __cdecl main() {
     xdkLog("BS: main() entered\n");
 
     XVIDEO_MODE videoMode;
-    XGetVideoMode(&videoMode); // render at the dashboard's output resolution
-    if (videoMode.dwDisplayWidth > 0 && videoMode.dwDisplayHeight > 0) {
-        SCREEN_WIDTH = (int)videoMode.dwDisplayWidth;
-        SCREEN_HEIGHT = (int)videoMode.dwDisplayHeight;
+    XGetVideoMode(&videoMode); // EDRAM caps the back buffer near 720p; the scaler handles 1080p output
+    if (!videoMode.fIsWideScreen) {
+        SCREEN_WIDTH = 640;
+        SCREEN_HEIGHT = 480;
     }
     xdkLog("BS: video mode %dx%d\n", SCREEN_WIDTH, SCREEN_HEIGHT);
 
