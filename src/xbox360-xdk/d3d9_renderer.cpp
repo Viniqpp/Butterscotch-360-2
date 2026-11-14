@@ -14,6 +14,7 @@
 #include "d3d9_transform.h"
 #include "runner.h"
 #include "vm_builtins.h"
+#include "stb_ds.h"
 
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -159,6 +160,55 @@ static void d3d9SetProjection(D3D9Renderer* dr, const Matrix4f* view, const Matr
     flushBatch(dr);
     Renderer_applyProjection(&dr->base, view, projection);
     d3d9RebuildTransform(dr);
+}
+
+static void d3d9ReleaseAppSurface(D3D9Renderer* dr);
+static void d3d9LoadUserShaders(D3D9Renderer* dr, DataWin* dw);
+static void d3d9ReleaseUserShaders(D3D9Renderer* dr);
+
+// Uniform scale + centring that fits the game into the back buffer.
+static void d3d9ComputeLetterbox(D3D9Renderer* dr) {
+    float scaleX = (float)dr->windowW / (float)dr->gameW;
+    float scaleY = (float)dr->windowH / (float)dr->gameH;
+    dr->renderScale = (scaleX < scaleY) ? scaleX : scaleY;
+    dr->renderOffsetX = ((float)dr->windowW - (float)dr->gameW * dr->renderScale) * 0.5f;
+    dr->renderOffsetY = ((float)dr->windowH - (float)dr->gameH * dr->renderScale) * 0.5f;
+}
+
+// Draws `texture` as a quad with screen-space corners x[i],y[i] (TL, TR, BR, BL).
+static void d3d9DrawTextureQuad(D3D9Renderer* dr, void* texture, const float* x, const float* y,
+                                float u0, float v0, float u1, float v1, uint32_t color, float alpha) {
+    if (!dr->sceneActive || !texture) return;
+    flushBatch(dr);
+    float r, g, b, a;
+    bgrToFloatColor(color, alpha, &r, &g, &b, &a);
+    SpriteVertex q[4];
+    setVertex(&q[0], x[0], y[0], u0, v0, r, g, b, a);
+    setVertex(&q[1], x[1], y[1], u1, v0, r, g, b, a);
+    setVertex(&q[2], x[2], y[2], u1, v1, r, g, b, a);
+    setVertex(&q[3], x[3], y[3], u0, v1, r, g, b, a);
+    SpriteVertex tri[6] = { q[0], q[1], q[2], q[0], q[2], q[3] };
+    IDirect3DDevice9* dev = Dev(dr);
+    dev->SetTexture(0, (IDirect3DBaseTexture9*)texture);
+    dev->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2, tri, sizeof(SpriteVertex));
+    dr->currentTextureIndex = -1; // next batch rebinds its own texture
+}
+
+// EDRAM holds only the bound target: resolve the game image into appTexture
+// before switching to the back buffer, then clear the letterbox bars.
+static void d3d9LeaveAppSurface(D3D9Renderer* dr) {
+    IDirect3DDevice9* dev = Dev(dr);
+    flushBatch(dr);
+    dev->Resolve(D3DRESOLVE_RENDERTARGET0, NULL, (IDirect3DBaseTexture9*)dr->appTexture,
+                 NULL, 0, 0, NULL, 1.0f, 0, NULL);
+    IDirect3DSurface9* backBuffer = NULL;
+    if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer)) && backBuffer) {
+        dev->SetRenderTarget(0, backBuffer);
+        backBuffer->Release();
+    }
+    dr->onAppSurface = false;
+    d3d9ComputeLetterbox(dr);
+    dev->Clear(0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
 }
 
 // Default ortho over the whole application surface, as a freshly bound target has.
@@ -416,6 +466,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 
     dr->currentTextureIndex = -1;
     dr->quadCount = 0;
+    d3d9LoadUserShaders(dr, dataWin);
     dr->initialized = true;
     logInfo("BS: D3D9 renderer initialized (%u texture pages)\n", dr->textureCount);
 }
@@ -438,6 +489,8 @@ static void d3d9Destroy(Renderer* renderer) {
     if (dr->pVertexShader) ((IDirect3DVertexShader9*)dr->pVertexShader)->Release();
     if (dr->pPixelShader) ((IDirect3DPixelShader9*)dr->pPixelShader)->Release();
     if (dr->pVertexDecl) ((IDirect3DVertexDeclaration9*)dr->pVertexDecl)->Release();
+    d3d9ReleaseAppSurface(dr);
+    d3d9ReleaseUserShaders(dr);
     free(dr);
 }
 
@@ -448,13 +501,15 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
 
     dr->gameW = gameW;
     dr->gameH = gameH;
-
-    // Compute uniform scale to fit game in screen with letterboxing
-    float scaleX = (float)windowW / (float)gameW;
-    float scaleY = (float)windowH / (float)gameH;
-    dr->renderScale = (scaleX < scaleY) ? scaleX : scaleY;
-    dr->renderOffsetX = ((float)windowW - (float)gameW * dr->renderScale) * 0.5f;
-    dr->renderOffsetY = ((float)windowH - (float)gameH * dr->renderScale) * 0.5f;
+    dr->windowW = windowW;
+    dr->windowH = windowH;
+    d3d9ComputeLetterbox(dr);
+    // On the application surface the game draws at its own resolution;
+    // the letterbox is applied once, when the surface is blitted.
+    if (dr->appTarget) {
+        dr->renderScale = 1.0f;
+        dr->renderOffsetX = dr->renderOffsetY = 0.0f;
+    }
     dr->guiActive = false;
     d3d9ResetToGameArea(dr);
 
@@ -480,6 +535,8 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
         return;
     }
     dr->sceneActive = true;
+    dr->onAppSurface = dr->appTarget &&
+        SUCCEEDED(dev->SetRenderTarget(0, (IDirect3DSurface9*)dr->appTarget));
 
     // Set shared render state
     dev->SetVertexShader((IDirect3DVertexShader9*)dr->pVertexShader);
@@ -1092,7 +1149,32 @@ static int32_t d3d9CreateSpriteFromSurfaceModern(Renderer* renderer, int32_t sur
 
 // GUI coordinates are independent of the last room view. The platform presents
 // after this pass, so these hooks must never end or present the D3D scene.
-static void d3d9EndFrameInit(Renderer* renderer) { flushBatch((D3D9Renderer*)renderer); }
+// Views are done: put the application surface on screen, then Draw Post and
+// GUI draw over it on the back buffer (as GameMaker does).
+static void d3d9EndFrameInit(Renderer* renderer) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    flushBatch(dr);
+    if (!dr->onAppSurface) return;
+    d3d9LeaveAppSurface(dr);
+    Runner* runner = renderer->runner;
+    if (runner && runner->usingAppSurface && !runner->appSurfaceAutoDraw) return; // game draws it itself
+    float x0 = dr->renderOffsetX, y0 = dr->renderOffsetY;
+    float x1 = x0 + (float)dr->appW * dr->renderScale, y1 = y0 + (float)dr->appH * dr->renderScale;
+    float xs[4] = { x0, x1, x1, x0 }, ys[4] = { y0, y0, y1, y1 };
+    // One smooth upscale of the whole frame avoids uneven point-sampled rows at 1.5x.
+    IDirect3DDevice9* dev = Dev(dr);
+    DWORD minFilter = D3DTEXF_POINT, magFilter = D3DTEXF_POINT;
+    dev->GetSamplerState(0, D3DSAMP_MINFILTER, &minFilter);
+    dev->GetSamplerState(0, D3DSAMP_MAGFILTER, &magFilter);
+    dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE); // the game image is opaque
+    d3d9DrawTextureQuad(dr, dr->appTexture, xs, ys, 0.0f, 0.0f,
+                        (float)dr->appW / dr->appAllocW, (float)dr->appH / dr->appAllocH, 0xFFFFFF, 1.0f);
+    dev->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    dev->SetSamplerState(0, D3DSAMP_MINFILTER, minFilter);
+    dev->SetSamplerState(0, D3DSAMP_MAGFILTER, magFilter);
+}
 // Like upstream: keeps the viewport, re-applies the GUI camera. User surfaces
 // are not implemented here, so the upstream user-surface flip never applies.
 static void d3d9SetGuiProjection(Renderer* renderer, int32_t guiW, int32_t guiH,
@@ -1116,6 +1198,9 @@ static void d3d9BeginGUI(Renderer* renderer, int32_t guiW, int32_t guiH,
 
     int32_t x, y, w, h;
     D3D9Transform_letterbox(guiW, guiH, portW, portH, &x, &y, &w, &h);
+    if (dr->onAppSurface) { // Draw Pre into the real application surface: fill it
+        x = y = 0; w = dr->appW; h = dr->appH; portX = portY = 0;
+    }
     dr->viewportX = (float)(portX + x);
     dr->viewportY = (float)(portY + y);
     dr->viewportW = (float)w;
@@ -1258,10 +1343,20 @@ static void d3d9DrawSurfaceTiled(Renderer* renderer, int32_t surfaceID, float x,
 static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, int32_t st,
                             int32_t sw, int32_t sh, float x, float y, float xs, float ys,
                             float angle, uint32_t color, float alpha) {
-    // The application surface aliases the host framebuffer, so compositing it
-    // back onto itself is intentionally a no-op. Other surface IDs are unsupported.
-    (void)renderer; (void)surfaceID; (void)sl; (void)st; (void)sw; (void)sh;
-    (void)x; (void)y; (void)xs; (void)ys; (void)angle; (void)color; (void)alpha;
+    // Only application_surface exists; it can be drawn once resolved (after the
+    // views), not onto itself. User surfaces are not implemented yet.
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    if (surfaceID != APPLICATION_SURFACE_ID || !dr->appTexture || dr->onAppSurface ||
+        sw <= 0 || sh <= 0) return;
+    float px[4] = { 0.0f, sw * xs, sw * xs, 0.0f };
+    float py[4] = { 0.0f, 0.0f, sh * ys, sh * ys };
+    float rad = angle * (3.14159265f / 180.0f), cs = cosf(rad), sn = sinf(rad);
+    float sx[4], sy[4];
+    for (int i = 0; i < 4; i++) // rotate about (x, y) like the sprite paths
+        transformPoint(dr, x + px[i] * cs - py[i] * sn, y + px[i] * sn + py[i] * cs, &sx[i], &sy[i]);
+    d3d9DrawTextureQuad(dr, dr->appTexture, sx, sy,
+                        (float)sl / dr->appAllocW, (float)st / dr->appAllocH,
+                        (float)(sl + sw) / dr->appAllocW, (float)(st + sh) / dr->appAllocH, color, alpha);
 }
 // draw_surface_general: same surface semantics as drawSurface (called unguarded by the core).
 static void d3d9DrawSurfaceColor(Renderer* renderer, int32_t surfaceID, int32_t sl, int32_t st,
@@ -1388,9 +1483,45 @@ static bool d3d9SetRenderTarget(Renderer* r, int32_t id, bool implicit) {
     }
     return true;
 }
+static void d3d9ReleaseAppSurface(D3D9Renderer* dr) {
+    if (dr->appTarget) ((IDirect3DSurface9*)dr->appTarget)->Release();
+    if (dr->appTexture) ((IDirect3DTexture9*)dr->appTexture)->Release();
+    dr->appTarget = dr->appTexture = NULL;
+    dr->appW = dr->appH = 0;
+}
+
+// Called by Runner_beginFrame before beginFrame. On failure the backend keeps
+// drawing straight to the back buffer (the old behaviour) instead of failing.
 static int32_t d3d9EnsureApplicationSurface(Renderer* r, int32_t w, int32_t h) {
-    (void)r;
-    return w > 0 && h > 0 ? APPLICATION_SURFACE_ID : -1;
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    if (w <= 0 || h <= 0) return -1;
+    if (dr->appTarget && dr->appW == w && dr->appH == h) return APPLICATION_SURFACE_ID;
+    d3d9ReleaseAppSurface(dr);
+    IDirect3DDevice9* dev = Dev(dr);
+    if (!dev) return APPLICATION_SURFACE_ID;
+    int32_t allocW = (w + 7) & ~7, allocH = (h + 7) & ~7; // same alignment as the Refresh hotfix
+    IDirect3DTexture9* texture = NULL;
+    IDirect3DSurface9* target = NULL;
+    HRESULT hr = dev->CreateTexture((UINT)allocW, (UINT)allocH, 1, 0, D3DFMT_A8R8G8B8,
+                                    D3DPOOL_DEFAULT, &texture, NULL);
+    if (SUCCEEDED(hr) && texture)
+        hr = dev->CreateRenderTarget((UINT)allocW, (UINT)allocH, D3DFMT_A8R8G8B8,
+                                     D3DMULTISAMPLE_NONE, 0, FALSE, &target, NULL);
+    if (FAILED(hr) || !texture || !target) {
+        logWarn("D3D9: application_surface %dx%d unavailable (hr=0x%08X); drawing to the back buffer\n",
+                w, h, (unsigned)hr);
+        if (texture) texture->Release();
+        if (target) target->Release();
+        return APPLICATION_SURFACE_ID;
+    }
+    dr->appTexture = texture;
+    dr->appTarget = target;
+    dr->appW = w;
+    dr->appH = h;
+    dr->appAllocW = allocW;
+    dr->appAllocH = allocH;
+    logInfo("D3D9: application_surface %dx%d\n", w, h);
+    return APPLICATION_SURFACE_ID;
 }
 static float d3d9GetSurfaceWidth(Renderer* r, int32_t id) {
     if (id != APPLICATION_SURFACE_ID) return 0.0f;
@@ -1447,18 +1578,134 @@ static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
     return true;
 }
 static void d3d9TextureSetStage(Renderer* r, int32_t slot, uint32_t texID) {
-    if (slot != 0) return;
     D3D9Renderer* dr = (D3D9Renderer*)r;
+    if (slot > 0 && slot < 16) { // extra samplers for shaders (palettes, LUTs)
+        flushBatch(dr);
+        int32_t page = d3d9TextureHandleToPage(dr, texID);
+        IDirect3DDevice9* dev = Dev(dr);
+        dev->SetTexture(slot, page >= 0 ? (IDirect3DBaseTexture9*)dr->textures[page] : NULL);
+        dev->SetSamplerState(slot, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        dev->SetSamplerState(slot, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        dev->SetSamplerState(slot, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        dev->SetSamplerState(slot, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        return;
+    }
+    if (slot != 0) return;
     ensureTexture(dr, d3d9TextureHandleToPage(dr, texID));
 }
-static void d3d9GpuSetShader(Renderer* r, int32_t i) { (void)r; (void)i; }
-static void d3d9GpuResetShader(Renderer* r) { (void)r; }
-static int32_t d3d9ShaderGetUniform(Renderer* r, int32_t s, char* n) { (void)r; (void)s; (void)n; return -1; }
-static int32_t d3d9ShaderGetSamplerIndex(Renderer* r, int32_t s, char* n) { (void)r; (void)s; (void)n; return -1; }
-static void d3d9ShaderSetUniformF(Renderer* r, int32_t h, int32_t c, float a, float b, float d, float e) { (void)r; (void)h; (void)c; (void)a; (void)b; (void)d; (void)e; }
-static void d3d9ShaderSetUniformI(Renderer* r, int32_t h, int32_t c, int32_t a, int32_t b, int32_t d, int32_t e) { (void)r; (void)h; (void)c; (void)a; (void)b; (void)d; (void)e; }
-static bool d3d9ShaderIsCompiled(Renderer* r, int32_t i) { (void)r; (void)i; return false; }
-static bool d3d9ShadersSupported(void) { return false; }
+// ===[ GameMaker shaders ]===
+// Pixel shaders only: the fixed vertex shader already provides v_vTexcoord and
+// v_vColour. Uniform handles index uniformHandles (shader + D3DX constant).
+typedef struct { int32_t shader; D3DXHANDLE handle; } D3D9UniformRef;
+
+static void d3d9LoadUserShaders(D3D9Renderer* dr, DataWin* dw) {
+    dr->userShaderCount = dw->shdr.count;
+    if (dr->userShaderCount == 0) return;
+    dr->userPixelShaders = (void**)calloc(dr->userShaderCount, sizeof(void*));
+    dr->userConstantTables = (void**)calloc(dr->userShaderCount, sizeof(void*));
+    if (!dr->userPixelShaders || !dr->userConstantTables) { dr->userShaderCount = 0; return; }
+    uint32_t loaded = 0;
+    for (uint32_t i = 0; i < dr->userShaderCount; i++) {
+        const char* name = dw->shdr.shaders[i].name;
+        char path[256];
+        if (!name || snprintf(path, sizeof(path), "game:\\shaders\\%s.xps", name) >= (int)sizeof(path)) continue;
+        FILE* f = fopen(path, "rb");
+        if (!f) continue;
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        DWORD* code = size > 0 && size < 1024 * 1024 ? (DWORD*)malloc((size_t)size) : NULL;
+        if (code && fread(code, 1, (size_t)size, f) == (size_t)size &&
+            SUCCEEDED(Dev(dr)->CreatePixelShader(code, (IDirect3DPixelShader9**)&dr->userPixelShaders[i]))) {
+            D3DXGetShaderConstantTable(code, (ID3DXConstantTable**)&dr->userConstantTables[i]);
+            loaded++;
+        }
+        free(code);
+        fclose(f);
+    }
+    logInfo("D3D9: loaded %u/%u precompiled shaders\n", loaded, dr->userShaderCount);
+}
+
+static void d3d9ReleaseUserShaders(D3D9Renderer* dr) {
+    for (uint32_t i = 0; i < dr->userShaderCount; i++) {
+        if (dr->userPixelShaders[i]) ((IDirect3DPixelShader9*)dr->userPixelShaders[i])->Release();
+        if (dr->userConstantTables[i]) ((ID3DXConstantTable*)dr->userConstantTables[i])->Release();
+    }
+    free(dr->userPixelShaders);
+    free(dr->userConstantTables);
+    D3D9UniformRef* refs = (D3D9UniformRef*)dr->uniformHandles;
+    arrfree(refs);
+    dr->uniformHandles = NULL;
+    dr->userShaderCount = 0;
+}
+
+static ID3DXConstantTable* d3d9ShaderTable(D3D9Renderer* dr, int32_t shader) {
+    if (shader < 0 || (uint32_t)shader >= dr->userShaderCount) return NULL;
+    return (ID3DXConstantTable*)dr->userConstantTables[shader];
+}
+
+static void d3d9GpuSetShader(Renderer* r, int32_t i) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    flushBatch(dr);
+    IDirect3DPixelShader9* ps = i >= 0 && (uint32_t)i < dr->userShaderCount
+        ? (IDirect3DPixelShader9*)dr->userPixelShaders[i] : NULL;
+    Dev(dr)->SetPixelShader(ps ? ps : (IDirect3DPixelShader9*)dr->pPixelShader);
+}
+static void d3d9GpuResetShader(Renderer* r) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    flushBatch(dr);
+    Dev(dr)->SetPixelShader((IDirect3DPixelShader9*)dr->pPixelShader);
+}
+static int32_t d3d9ShaderGetUniform(Renderer* r, int32_t s, char* n) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    ID3DXConstantTable* table = d3d9ShaderTable(dr, s);
+    D3DXHANDLE handle = table && n ? table->GetConstantByName(NULL, n) : NULL;
+    if (!handle) return -1;
+    D3D9UniformRef* refs = (D3D9UniformRef*)dr->uniformHandles;
+    for (int32_t k = 0; k < (int32_t)arrlen(refs); k++)
+        if (refs[k].shader == s && refs[k].handle == handle) return k;
+    D3D9UniformRef ref = { s, handle };
+    arrput(refs, ref);
+    dr->uniformHandles = refs;
+    return (int32_t)arrlen(refs) - 1;
+}
+static int32_t d3d9ShaderGetSamplerIndex(Renderer* r, int32_t s, char* n) {
+    ID3DXConstantTable* table = d3d9ShaderTable((D3D9Renderer*)r, s);
+    D3DXHANDLE handle = table && n ? table->GetConstantByName(NULL, n) : NULL;
+    return handle ? (int32_t)table->GetSamplerIndex(handle) : -1;
+}
+// Resolves a uniform handle to its constant table, flushing draws queued under the old value.
+static ID3DXConstantTable* d3d9UniformTarget(D3D9Renderer* dr, int32_t h, D3DXHANDLE* outHandle) {
+    D3D9UniformRef* refs = (D3D9UniformRef*)dr->uniformHandles;
+    if (h < 0 || h >= (int32_t)arrlen(refs)) return NULL;
+    ID3DXConstantTable* table = d3d9ShaderTable(dr, refs[h].shader);
+    if (!table) return NULL;
+    flushBatch(dr);
+    *outHandle = refs[h].handle;
+    return table;
+}
+static void d3d9ShaderSetUniformFArray(Renderer* r, int32_t h, float* values, uint32_t count) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    D3DXHANDLE handle;
+    ID3DXConstantTable* table = d3d9UniformTarget(dr, h, &handle);
+    if (table && values) table->SetFloatArray(Dev(dr), handle, values, count);
+}
+static void d3d9ShaderSetUniformF(Renderer* r, int32_t h, int32_t c, float a, float b, float d, float e) {
+    float values[4] = { a, b, d, e };
+    d3d9ShaderSetUniformFArray(r, h, values, (uint32_t)(c < 1 ? 1 : c > 4 ? 4 : c));
+}
+static void d3d9ShaderSetUniformI(Renderer* r, int32_t h, int32_t c, int32_t a, int32_t b, int32_t d, int32_t e) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    D3DXHANDLE handle;
+    ID3DXConstantTable* table = d3d9UniformTarget(dr, h, &handle);
+    INT values[4] = { a, b, d, e };
+    if (table) table->SetIntArray(Dev(dr), handle, values, (UINT)(c < 1 ? 1 : c > 4 ? 4 : c));
+}
+static bool d3d9ShaderIsCompiled(Renderer* r, int32_t i) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    return i >= 0 && (uint32_t)i < dr->userShaderCount && dr->userPixelShaders[i] != NULL;
+}
+static bool d3d9ShadersSupported(void) { return true; }
 
 static BlendFactors d3d9GpuGetBlendFactors(Renderer* r) {
     return r->blendFactors;
@@ -1692,6 +1939,7 @@ static void d3d9InitializeRendererVtable(void) {
     d3d9RendererVtable.shaderGetSamplerIndex = d3d9ShaderGetSamplerIndex;
     d3d9RendererVtable.shaderSetUniformF = d3d9ShaderSetUniformF;
     d3d9RendererVtable.shaderSetUniformI = d3d9ShaderSetUniformI;
+    d3d9RendererVtable.shaderSetUniformFArray = d3d9ShaderSetUniformFArray;
     d3d9RendererVtable.shaderIsCompiled = d3d9ShaderIsCompiled;
     d3d9RendererVtable.shadersSupported = d3d9ShadersSupported;
     d3d9RendererVtableInitialized = true;

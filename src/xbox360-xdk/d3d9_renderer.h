@@ -63,6 +63,21 @@ typedef struct {
     float renderScale;   // uniform scale factor
     float renderOffsetX; // pixel offset for centering
     float renderOffsetY;
+    int32_t windowW, windowH;
+
+    // Real application_surface: a game-resolution EDRAM render target that is
+    // resolved into appTexture and scaled to the back buffer once per frame.
+    void* appTarget;  // IDirect3DSurface9*; NULL = draw straight to the back buffer
+    void* appTexture; // IDirect3DTexture9*
+    int32_t appW, appH, appAllocW, appAllocH;
+    bool onAppSurface; // appTarget is the bound render target
+
+    // GameMaker shaders, precompiled offline (tools/xdk/translate_shaders.py)
+    // into game:\shaders\<name>.xps; NULL entries fall back to the default shader.
+    void** userPixelShaders;   // IDirect3DPixelShader9*[shdr.count]
+    void** userConstantTables; // ID3DXConstantTable*[shdr.count]
+    uint32_t userShaderCount;
+    void* uniformHandles;      // stb_ds array of { shader, D3DXHANDLE } (D3D9UniformRef)
 
     // Dynamic sprite tracking
     uint32_t originalTexturePageCount;

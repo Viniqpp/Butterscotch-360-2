@@ -105,6 +105,11 @@ if ($Package) {
     $dist = "$repo\dist\$Target"
     New-Item -ItemType Directory -Force $dist | Out-Null
     Copy-Item $xex.FullName "$dist\default.xex" -Force   # Aurora launches default.xex
-    if ($DataWin) { Copy-Item $DataWin "$dist\data.win" -Force }
+    if ($DataWin) {
+        Copy-Item $DataWin "$dist\data.win" -Force
+        # Game shaders: GLSL ES -> HLSL -> Xenon microcode, loaded from game:\shaders.
+        & python "$repo\tools\xdk\translate_shaders.py" $DataWin "$dist\shaders" --fxc "$XdkDir\bin\win32\fxc.exe"
+        if ($LASTEXITCODE -ne 0) { Write-Host "Some shaders failed to translate; those effects fall back to the default shader." -ForegroundColor Yellow }
+    }
     Write-Host "Staged for FTP: $dist"
 }
