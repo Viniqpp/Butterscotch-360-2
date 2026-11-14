@@ -209,7 +209,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     dr->gameH = (int32_t)dataWin->gen8.defaultWindowHeight;
     dr->blendMode = bm_normal;
     dr->textureBytesAllocated = 0;
-    dr->maxTextureBytes = 128u * 1024u * 1024u;
+    dr->maxTextureBytes = 256u * 1024u * 1024u; // Undertale needs ~170 MB; 512 MB console RAM
     renderer->blendFactors.src = bm_src_alpha;
     renderer->blendFactors.dst = bm_inv_src_alpha;
     renderer->blendFactors.srcAlpha = bm_src_alpha;
