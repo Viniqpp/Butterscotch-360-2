@@ -22,7 +22,9 @@
 #include "stb_ds.h"
 
 #include <errno.h>
-#ifdef _WIN32
+#if defined(_XBOX)
+#include <windows.h> // xtl.h; Xbox has no process path or working directory
+#elif defined(_WIN32)
 #include <windows.h>
 #include <direct.h>
 // Older Windows SDK headers may not define the UTF-8 code page constant.
@@ -2783,7 +2785,7 @@ Instance* Runner_copyInstance(Runner* runner, Instance* source, bool performEven
 }
 
 static char* getExecutablePath(void) {
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_XBOX)
     DWORD capacity = 512;
     for (;;) {
         wchar_t* buffer = (wchar_t*)safeMalloc((size_t)capacity * sizeof(wchar_t));
@@ -2845,7 +2847,10 @@ static char* getCurrentWorkingDirectory(void) {
     size_t capacity = 512;
     for (;;) {
         char* directory = (char*)safeMalloc(capacity);
-#ifdef _WIN32
+#if defined(_XBOX)
+        free(directory);
+        return nullptr;
+#elif defined(_WIN32)
         if (_getcwd(directory, (int)capacity) != nullptr) return directory;
 #else
         if (getcwd(directory, capacity) != nullptr) return directory;

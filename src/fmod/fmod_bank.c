@@ -131,6 +131,7 @@ static FmBank* parseBank(FmodSystem* system, const char* path) {
     uint32_t position = 12, metadataEnd = 0, fsbOffset = 0, fsbBytes = 0;
     FmBank* bank = nullptr;
     uint8_t* fsb = nullptr;
+    bool hasFormat = false; // declared before the first goto: C++ (XDK /TP) rejects jumping past an initialiser
     void* file = system->fs->vtable->binaryOpen(system->fs, path, GML_FILE_BIN_READ);
     if (!file) return nullptr;
     int32_t fileSize = system->fs->vtable->binarySize(system->fs, file);
@@ -169,7 +170,6 @@ static FmBank* parseBank(FmodSystem* system, const char* path) {
     bank->metadata = (uint8_t*) malloc(metadataEnd);
     if (!bank->path || !bank->metadata || !readAt(system, file, 0, bank->metadata, metadataEnd) || !parseRecords(bank, 12, metadataEnd, -1, 0)) goto fail;
 
-    bool hasFormat = false;
     for (ptrdiff_t i = 0; i < arrlen(bank->records); i++) {
         Record* record = &bank->records[i];
         if (tagIs(record, "FMT ")) {

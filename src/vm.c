@@ -2805,7 +2805,7 @@ static RValue executeBytecodeInstructions(VMContext* ctx, CodeEntry* code) {
     // The ip is mutable, so we need to use VM_SYNC_IP and VM_RELOAD_IP every time an opcode handler may access it or write to it
     uint32_t ip = code->offset;
 
-    RValue* restrict slots = ctx->stack.slots;
+    RValue* __restrict slots = ctx->stack.slots;
 
     // Some opcodes have their handler or parts of their handler inlined
     // Those are opcodes that during real gameplay (using "--profile-opcodes") shown that, with inlining and keeping only the frequently called handle parts, we could squeeze MORE performance from the interpreter!

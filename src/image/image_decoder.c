@@ -47,7 +47,7 @@ static inline uint8_t signExtend(uint32_t val, int bits) {
 }
 
 // Decodes GameMaker's custom QOI format (ported from UndertaleModTool's QoiConverter).
-static uint8_t* decodeQoi(const uint8_t* restrict data, size_t dataSize, int* restrict outW, int* restrict outH) {
+static uint8_t* decodeQoi(const uint8_t* __restrict data, size_t dataSize, int* __restrict outW, int* __restrict outH) {
     if (QOI_HEADER_SIZE > dataSize) return nullptr;
     if (data[0] != 'f' || data[1] != 'i' || data[2] != 'o' || data[3] != 'q') return nullptr;
 
@@ -58,10 +58,10 @@ static uint8_t* decodeQoi(const uint8_t* restrict data, size_t dataSize, int* re
     if (QOI_HEADER_SIZE + (size_t) length > dataSize) return nullptr;
     if (0 >= width || 0 >= height) return nullptr;
 
-    const uint8_t* restrict pixelData = data + QOI_HEADER_SIZE;
-    const uint8_t* restrict pixelDataEnd = pixelData + length;
+    const uint8_t* __restrict pixelData = data + QOI_HEADER_SIZE;
+    const uint8_t* __restrict pixelDataEnd = pixelData + length;
     size_t rawSize = (size_t)width * (size_t)height;
-    uint32_t* restrict raw = (uint32_t*)safeMalloc(rawSize * sizeof(uint32_t));
+    uint32_t* __restrict raw = (uint32_t*)safeMalloc(rawSize * sizeof(uint32_t));
     if (!raw) return nullptr;
 
     const uint32_t* rawStart = raw;

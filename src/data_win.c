@@ -10,10 +10,10 @@
 #include "stb_ds.h"
 #include "utils.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_XBOX)
     #include <windows.h>
     #include <io.h>
-#else
+#elif !defined(_XBOX)
     #include <unistd.h>
     #if defined(_POSIX_MAPPED_FILES) && (_POSIX_MAPPED_FILES > 0)
         #include <sys/mman.h>
@@ -23,7 +23,7 @@
 static uint8_t *mapFile(FILE *file, size_t size) {
     if (!file || size == 0) return NULL;
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(_XBOX)
     intptr_t osHandle = _get_osfhandle(_fileno(file));
     if (osHandle == -1) return NULL;
     HANDLE hFile = (HANDLE)osHandle;
@@ -63,7 +63,7 @@ static uint8_t *mapFile(FILE *file, size_t size) {
 static void unmapFile(uint8_t *ptr, size_t size) {
     if (!ptr) return;
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_XBOX)
     (void)size;
     UnmapViewOfFile((LPCVOID)ptr);
 #elif defined(_POSIX_MAPPED_FILES) && _POSIX_MAPPED_FILES > 0
