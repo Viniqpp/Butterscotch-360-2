@@ -154,7 +154,24 @@ __forceinline float expm1f(float x) {
 // (StringBuilder_appendFormat sizes its buffer from the return value), so
 // wrap them: return the full length and always NUL-terminate.
 #include <stdarg.h>
+// The old CRT has no C99 'z' (size_t) length modifier and prints "zu" literally;
+// MSVC spells it 'I' (pointer-sized, so it matches size_t on every target).
+inline const char* bs_msvc_translate_z(const char* fmt, char* out, size_t outSize) {
+    size_t n = strlen(fmt);
+    if (!strchr(fmt, 'z') || n >= outSize) return fmt; // shortcut: formats over 511 chars keep 'z'
+    bool inSpec = false;
+    for (size_t i = 0; i <= n; i++) {
+        char c = fmt[i];
+        if (!inSpec) inSpec = c == '%';
+        else if (c == 'z') c = 'I';
+        else if (!strchr("-+ #0123456789.*hlLI", c)) inSpec = false; // conversion char (or "%%") ends it
+        out[i] = c;
+    }
+    return out;
+}
 inline int bs_msvc_vsnprintf(char* buf, size_t size, const char* fmt, va_list ap) {
+    char translated[512];
+    fmt = bs_msvc_translate_z(fmt, translated, sizeof(translated));
     va_list measure = ap; // MSVC va_list is a plain pointer; VS2013's va_copy is this assignment
     int needed = _vscprintf(fmt, measure);
     if (buf && size > 0) {
