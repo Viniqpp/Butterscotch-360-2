@@ -371,10 +371,6 @@ RECENT REVISION HISTORY:
 #include <stdio.h>
 #endif // STBI_NO_STDIO
 
-#if defined(__TINYC__) || (defined(_MSC_VER) && _MSC_VER < 1300)
-#define STBI_NO_SIMD
-#endif
-
 #define STBI_VERSION 1
 
 enum
@@ -621,15 +617,8 @@ STBIDEF int   stbi_zlib_decode_noheader_buffer(char *obuffer, int olen, const ch
    #define stbi_inline
    #endif
 #else
-   #if _MSC_VER >= 1200
    #define stbi_inline __forceinline
-   #else
-   #define stbi_inline inline
-   #endif
 #endif
-
-// we're currently not using threads, and some targets (like old macOS) don't support TLS
-#define STBI_NO_THREAD_LOCALS
 
 #ifndef STBI_NO_THREAD_LOCALS
    #if defined(__cplusplus) &&  __cplusplus >= 201103L
@@ -783,10 +772,6 @@ static int stbi__sse2_available(void)
 #endif
 
 #endif
-#endif
-
-#ifdef __ARM_NEON__
-#define STBI_NEON
 #endif
 
 // ARM NEON

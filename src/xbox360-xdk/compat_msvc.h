@@ -4,13 +4,6 @@
 
 #pragma once
 
-// Pull the XDK headers in at global C++ scope first. Later <windows.h> includes
-// (via the xtl.h shim) can sit inside extern "C" blocks such as bzlib.h's,
-// where xtl.h's templates fail with C2894.
-#ifdef _XBOX
-#include <xtl.h>
-#endif
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -114,27 +107,6 @@ __forceinline double fmax(double a, double b) { return (a > b) ? a : b; }
 __forceinline float fminf(float a, float b) { return (a < b) ? a : b; }
 __forceinline float fmaxf(float a, float b) { return (a > b) ? a : b; }
 
-// C99 classification/log2/exp2 arrived in MSVC 2013 (_MSC_VER 1800); the XDK
-// 21256 compiler is 2010-era. Used by vm_builtins.c, rvalue.h and src/fmod.
-#include <float.h>
-#if defined(_MSC_VER) && _MSC_VER < 1800
-#ifndef isnan
-#define isnan(x) (_isnan((double)(x)) != 0)
-#endif
-#ifndef isinf
-#define isinf(x) (!_finite((double)(x)) && !_isnan((double)(x)))
-#endif
-#ifndef isfinite
-#define isfinite(x) (_finite((double)(x)) != 0)
-#endif
-__forceinline double log2(double x) { return log(x) * 1.4426950408889634; }
-__forceinline double exp2(double x) { return pow(2.0, x); }
-// Series near 0 keeps fmod.c's expm1f(a*x)/expm1f(a) curve accurate for tiny exponents.
-__forceinline float expm1f(float x) {
-    return fabsf(x) < 1e-5f ? x + 0.5f * x * x : (float)(exp((double)x) - 1.0);
-}
-#endif
-
 // INFINITY: MSVC 2010 doesn't define this C99 macro
 #ifndef INFINITY
 #define INFINITY ((float)(1e+300 * 1e+300))
@@ -149,49 +121,9 @@ __forceinline float expm1f(float x) {
 #endif
 
 // ===[ snprintf ]===
-// Pre-2015 MSVC only has _snprintf/_vsnprintf, which return -1 on truncation
-// and leave the buffer unterminated. The core relies on C99 semantics
-// (StringBuilder_appendFormat sizes its buffer from the return value), so
-// wrap them: return the full length and always NUL-terminate.
-#include <stdarg.h>
-// The old CRT has no C99 'z' (size_t) length modifier and prints "zu" literally;
-// MSVC spells it 'I' (pointer-sized, so it matches size_t on every target).
-inline const char* bs_msvc_translate_z(const char* fmt, char* out, size_t outSize) {
-    size_t n = strlen(fmt);
-    if (!strchr(fmt, 'z') || n >= outSize) return fmt; // shortcut: formats over 511 chars keep 'z'
-    bool inSpec = false;
-    for (size_t i = 0; i <= n; i++) {
-        char c = fmt[i];
-        if (!inSpec) inSpec = c == '%';
-        else if (c == 'z') c = 'I';
-        else if (!strchr("-+ #0123456789.*hlLI", c)) inSpec = false; // conversion char (or "%%") ends it
-        out[i] = c;
-    }
-    return out;
-}
-inline int bs_msvc_vsnprintf(char* buf, size_t size, const char* fmt, va_list ap) {
-    char translated[512];
-    fmt = bs_msvc_translate_z(fmt, translated, sizeof(translated));
-    va_list measure = ap; // MSVC va_list is a plain pointer; VS2013's va_copy is this assignment
-    int needed = _vscprintf(fmt, measure);
-    if (buf && size > 0) {
-        _vsnprintf(buf, size, fmt, ap);
-        buf[size - 1] = '\0';
-    }
-    return needed;
-}
-inline int bs_msvc_snprintf(char* buf, size_t size, const char* fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    int needed = bs_msvc_vsnprintf(buf, size, fmt, ap);
-    va_end(ap);
-    return needed;
-}
-#if defined(_MSC_VER) && _MSC_VER < 1900
-#undef snprintf
-#undef vsnprintf
-#define snprintf bs_msvc_snprintf
-#define vsnprintf bs_msvc_vsnprintf
+// MSVC 2010 has _snprintf but not C99 snprintf.
+#ifndef snprintf
+#define snprintf _snprintf
 #endif
 
 // ===[ POSIX clock polyfill ]===

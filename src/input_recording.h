@@ -1,29 +1,22 @@
-#ifndef _BS_INPUT_RECORDING_H_
-#define _BS_INPUT_RECORDING_H_
+#pragma once
 
-#include "common.h"
 #include <stdint.h>
 
 #include "runner_keyboard.h"
 
-typedef struct InputFrame {
-    int32_t* keysPressed;
-    int32_t* keysReleased;
-} InputFrame;
-
 typedef struct InputRecording {
     bool isRecording;
     bool isPlayback;
-    bool filterDebugKeys;
     const char* recordFilePath;
 
-    // Recording: stb_ds array of stb_ds InputFrame arrays (one per frame)
-    InputFrame* recordedFrames;
+    // Recording: stb_ds array of stb_ds int32_t arrays (one per frame)
+    int32_t** recordedFrames;
 
     // Playback: same structure, loaded from JSON
-    InputFrame* playbackFrames;
+    int32_t** playbackFrames;
     int32_t playbackFrameCount;
     bool playbackEnded;
+    bool previousKeyDown[GML_KEY_COUNT];
 } InputRecording;
 
 // Create a recorder that snapshots keyboard state each frame
@@ -44,5 +37,3 @@ bool InputRecording_save(InputRecording* recording);
 
 // Null-safe check: returns true if recording is non-null and playback hasn't ended yet
 bool InputRecording_isPlaybackActive(InputRecording* recording);
-
-#endif /* _BS_INPUT_RECORDING_H_ */

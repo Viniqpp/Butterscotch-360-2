@@ -1,7 +1,5 @@
-#ifndef _BS_INI_H_
-#define _BS_INI_H_
+#pragma once
 
-#include "common.h"
 #include <stddef.h>
 
 #define INI_SERIALIZE_DEFAULT_INITIAL_CAPACITY 256
@@ -42,5 +40,3 @@ void Ini_deleteSection(IniFile* ini, const char* section);
 // ===[ Serialization ]===
 
 char* Ini_serialize(const IniFile* ini, size_t initialCapacity);
-
-#endif /* _BS_INI_H_ */

@@ -1,4 +1,4 @@
-// Butterscotch Xbox 360 ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â XDK Entry Point
+// Butterscotch Xbox 360 — XDK Entry Point
 // Uses official Xbox 360 SDK: D3D9, XAudio2, XInputGetState
 
 #include <xtl.h>
@@ -7,107 +7,34 @@
 #include <cstdlib>
 #include <cstring>
 
+// DbgPrint is a C-linkage kernel function — declare it explicitly since
+// we compile .c files as C++ and removed extern "C" wrappers.
+extern "C" ULONG __cdecl DbgPrint(const char* format, ...);
 
-// Core headers ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â compiled as C++ alongside the .c files (via /TP flag)
+// Core headers — compiled as C++ alongside the .c files (via /TP flag)
 #include "runner.h"
 #include "runner_keyboard.h"
-#include "runner_gamepad.h"
 #include "vm.h"
 #include "data_win.h"
 #include "json_reader.h"
 #include "utils.h"
-#include "log.h"
 #include "stb_ds.h"
 
 #include "d3d9_renderer.h"
 #include "xaudio2_audio.h"
 #include "xdk_file_system.h"
 
-// Debug output is invisible on a retail/RGH console without xbdm, so mirror
-// every line to game:\butterscotch.log. Write-through keeps the last lines
-// on disk even if the console crashes or powers off.
-// shortcut: one unbuffered write per line is slow; fine while the port is being brought up.
-extern "C" ULONG __cdecl DbgPrint(const char* format, ...); // kernel export; Xenia copies it into xenia.log
-static HANDLE g_logFile = INVALID_HANDLE_VALUE;
-static void xdkWriteLog(const char* text) {
-    DbgPrint("%s", text);
-    static bool openTried = false; // read-only game:\ (Xenia, discs): don't retry per line
-    if (!openTried) {
-        openTried = true;
-        g_logFile = CreateFileA("game:\\butterscotch.log", GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
-    }
-    if (g_logFile == INVALID_HANDLE_VALUE) return;
-    DWORD written = 0;
-    WriteFile(g_logFile, text, (DWORD)strlen(text), &written, NULL);
-}
-
-static void xdkLog(const char* format, ...) {
-    char line[1024];
-    va_list va;
-    va_start(va, format);
-    vsnprintf(line, sizeof(line), format, va); // compat_msvc.h wrapper: always terminated
-    va_end(va);
-    xdkWriteLog(line);
-}
-
-// The core's log.c forwards every log line to the platform (cli/main.c has the desktop one).
-void platformLog(const logType type, const char* format, va_list va) {
-    char line[1024];
-    vsnprintf(line, sizeof(line), format, va);
-    xdkWriteLog(type == LOG_TYPE_ERROR ? "BS error: " : type == LOG_TYPE_WARNING ? "BS warning: " : "BS: ");
-    xdkWriteLog(line);
-}
-
-// game_change(working_directory, "-game <path>") -> g_nextGame, a game:\ path.
-// Segments are normalised so ".." never climbs above game:\ (where the launcher sits).
-static char g_nextGame[256];
-static char g_nextArgs[256];
-static void xdkPrepareGameChange(Runner* runner) {
-    const char* params = runner->pendingLaunchParameters;
-    const char* wd = runner->pendingWorkingDirectory ? runner->pendingWorkingDirectory : "";
-    const char* rel = strstr(params, "-game");
-    rel = rel ? rel + 5 : params;
-    while (*rel == ' ') rel++;
-    bool quoted = *rel == '"';
-    if (quoted) rel++;
-    // The path ends at its closing quote or the first space; the rest are game
-    // arguments (Deltarune: "launcher switch_-1 returning_0") for parameter_string().
-    size_t relLen = strcspn(rel, quoted ? "\"" : " ");
-    const char* rest = rel + relLen + (quoted && rel[relLen] ? 1 : 0);
-    while (*rest == ' ') rest++;
-    snprintf(g_nextArgs, sizeof(g_nextArgs), "%s", rest);
-    char joined[512];
-    // An absolute host path (C:\...) means nothing on the console: keep only the relative part.
-    snprintf(joined, sizeof(joined), "%s\\%.*s", strchr(wd, ':') ? "" : wd, (int)relLen, rel);
-    strcpy(g_nextGame, "game:");
-    for (char* seg = strtok(joined, "\\/"); seg; seg = strtok(NULL, "\\/")) {
-        if (!strcmp(seg, ".") || !seg[0]) continue;
-        if (!strcmp(seg, "..")) {
-            char* last = strrchr(g_nextGame, '\\');
-            if (last) *last = '\0';
-            continue;
-        }
-        if (strlen(g_nextGame) + strlen(seg) + 2 >= sizeof(g_nextGame)) break;
-        strcat(g_nextGame, "\\");
-        strcat(g_nextGame, seg);
-    }
-    xdkLog("BS: game_change(\"%s\", \"%s\") -> %s [%s]\n", wd, params, g_nextGame, g_nextArgs);
-}
-
 // ===[ POSIX clock polyfill implementation ]===
 double _xdk_monotonic_ms(void) {
     LARGE_INTEGER freq, counter;
-    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 ||
-        !QueryPerformanceCounter(&counter)) {
-        return (double)GetTickCount();
-    }
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
     return (double)counter.QuadPart / (double)freq.QuadPart * 1000.0;
 }
 
 // Screen dimensions (720p native)
-static int SCREEN_WIDTH = 1280; // replaced by the console's video mode in main()
-static int SCREEN_HEIGHT = 720;
+#define SCREEN_WIDTH  1280
+#define SCREEN_HEIGHT 720
 
 // ===[ Controller Mapping ]===
 
@@ -135,143 +62,19 @@ static void setupDefaultMappings(void) {
         { XINPUT_GAMEPAD_START,      27 },  // VK_ESCAPE (menu)
         { XINPUT_GAMEPAD_BACK,       27 },  // VK_ESCAPE
     };
-    xpadMappings = (XpadMapping*)malloc(sizeof(defaults));
-    if (!xpadMappings) {
-        xpadMappingCount = 0;
-        xdkLog("BS: default controller mapping allocation failed\n");
-        return;
-    }
-    memcpy(xpadMappings, defaults, sizeof(defaults));
     xpadMappingCount = sizeof(defaults) / sizeof(XpadMapping);
-}
-
-static float xdkNormalizeStick(SHORT value) {
-    return value < 0 ? (float)value / 32768.0f : (float)value / 32767.0f;
-}
-
-// Publish the physical XInput state through the modern RunnerGamepad API as
-// well as the legacy keyboard mappings below. Edge transitions are generated
-// once per simulated game frame, not once per outer polling iteration.
-static void updateNativeGamepad(Runner* runner, const XINPUT_GAMEPAD* pad, bool connected) {
-    if (!runner || !runner->gamepads) return;
-    RunnerGamepadState* state = runner->gamepads;
-    bool previous[GP_BUTTON_COUNT];
-    for (int i = 0; i < GP_BUTTON_COUNT; i++)
-        previous[i] = state->slots[0].buttonDown[i];
-
-    RunnerGamepad_beginFrame(state);
-    GamepadSlot* slot = &state->slots[0];
-    for (int i = 0; i < GP_BUTTON_COUNT; i++)
-        slot->buttonDownPrev[i] = previous[i];
-
-    slot->connected = connected;
-    if (connected && pad) {
-        slot->jid = 0;
-        strcpy(slot->description, "Xbox 360 Controller");
-        strcpy(slot->guid, "xinput:0");
-
-        bool down[GP_BUTTON_COUNT] = { false };
-        float values[GP_BUTTON_COUNT] = { 0.0f };
-        down[0] = (pad->wButtons & XINPUT_GAMEPAD_A) != 0;
-        down[1] = (pad->wButtons & XINPUT_GAMEPAD_B) != 0;
-        down[2] = (pad->wButtons & XINPUT_GAMEPAD_X) != 0;
-        down[3] = (pad->wButtons & XINPUT_GAMEPAD_Y) != 0;
-        down[6] = (pad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER) != 0;
-        down[7] = (pad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER) != 0;
-        down[8] = (pad->wButtons & XINPUT_GAMEPAD_BACK) != 0;
-        down[9] = (pad->wButtons & XINPUT_GAMEPAD_START) != 0;
-        down[10] = (pad->wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0;
-        down[11] = (pad->wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0;
-        down[12] = (pad->wButtons & XINPUT_GAMEPAD_DPAD_UP) != 0;
-        down[13] = (pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
-        down[14] = (pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT) != 0;
-        down[15] = (pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) != 0;
-
-        values[4] = (float)pad->bLeftTrigger / 255.0f;
-        values[5] = (float)pad->bRightTrigger / 255.0f;
-        down[4] = values[4] >= slot->triggerThreshold;
-        down[5] = values[5] >= slot->triggerThreshold;
-        for (int i = 0; i < GP_BUTTON_COUNT; i++) {
-            if (i != 4 && i != 5) values[i] = down[i] ? 1.0f : 0.0f;
-        }
-
-        slot->axisValue[0] = xdkNormalizeStick(pad->sThumbLX);
-        slot->axisValue[1] = -xdkNormalizeStick(pad->sThumbLY);
-        slot->axisValue[2] = xdkNormalizeStick(pad->sThumbRX);
-        slot->axisValue[3] = -xdkNormalizeStick(pad->sThumbRY);
-        for (int i = 0; i < GP_BUTTON_COUNT; i++) {
-            slot->buttonDown[i] = down[i];
-            slot->buttonValue[i] = values[i];
-            slot->buttonPressed[i] = down[i] && !previous[i];
-            slot->buttonReleased[i] = !down[i] && previous[i];
-        }
-        state->connectedCount = 1;
-    } else {
-        memset(slot->buttonDown, 0, sizeof(slot->buttonDown));
-        memset(slot->buttonValue, 0, sizeof(slot->buttonValue));
-        memset(slot->axisValue, 0, sizeof(slot->axisValue));
-        slot->description[0] = '\0';
-        slot->guid[0] = '\0';
-        state->connectedCount = 0;
-    }
-}
-
-// Mirrors the modern platformSwapBuffers() hook: finish the D3D scene only
-// after the GUI pass has been drawn, then present the completed back buffer.
-static void platformSwapBuffers(D3D9Renderer* renderer) {
-    if (!renderer || !renderer->pd3dDevice) return;
-    IDirect3DDevice9* device = (IDirect3DDevice9*)renderer->pd3dDevice;
-
-    if (renderer->sceneActive) {
-        HRESULT hr = device->EndScene();
-        renderer->sceneActive = false;
-        if (FAILED(hr)) xdkLog("BS: EndScene failed: 0x%08X\n", (unsigned)hr);
-    }
-
-    HRESULT hr = device->Present(NULL, NULL, NULL, NULL);
-    if (FAILED(hr)) xdkLog("BS: Present failed: 0x%08X\n", (unsigned)hr);
-}
-
-static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
-                        XdkAudioSystem* xdkAudio, DataWin* dataWin,
-                        XdkFileSystem* xdkFs, JsonValue* configRoot,
-                        IDirect3DDevice9* device, IDirect3D9* d3d) {
-    // Runner_free closes outstanding FileSystem handles and resets the VM,
-    // so its dependencies must remain alive until it has completed.
-    if (runner) Runner_free(runner);
-
-    if (xdkAudio && xdkAudio->base.vtable && xdkAudio->base.vtable->destroy)
-        xdkAudio->base.vtable->destroy((AudioSystem*)xdkAudio);
-    if (renderer && renderer->vtable && renderer->vtable->destroy)
-        renderer->vtable->destroy(renderer);
-    if (vm) VM_free(vm);
-    if (dataWin) DataWin_free(dataWin);
-    if (configRoot) JsonReader_free(configRoot);
-    free(xdkFs);
-
-    if (device) device->Release();
-    if (d3d) d3d->Release();
-    free(xpadMappings);
-    xpadMappings = NULL;
-    xpadMappingCount = 0;
+    xpadMappings = (XpadMapping*)malloc(sizeof(defaults));
+    memcpy(xpadMappings, defaults, sizeof(defaults));
 }
 
 // ===[ Main Entry Point ]===
 
 VOID __cdecl main() {
-    xdkLog("BS: main() entered\n");
-
-    XVIDEO_MODE videoMode;
-    XGetVideoMode(&videoMode); // EDRAM caps the back buffer near 720p; the scaler handles 1080p output
-    if (!videoMode.fIsWideScreen) {
-        SCREEN_WIDTH = 640;
-        SCREEN_HEIGHT = 480;
-    }
-    xdkLog("BS: video mode %dx%d\n", SCREEN_WIDTH, SCREEN_HEIGHT);
+    DbgPrint("BS: main() entered\n");
 
     IDirect3D9* pD3D = Direct3DCreate9(D3D_SDK_VERSION);
-    if (!pD3D) { xdkLog("BS: FATAL: D3D create failed\n"); return; }
-    xdkLog("BS: D3D9 created\n");
+    if (!pD3D) { DbgPrint("BS: FATAL: D3D create failed\n"); return; }
+    DbgPrint("BS: D3D9 created\n");
 
     D3DPRESENT_PARAMETERS d3dpp;
     ZeroMemory(&d3dpp, sizeof(d3dpp));
@@ -291,11 +94,10 @@ VOID __cdecl main() {
                                     D3DCREATE_HARDWARE_VERTEXPROCESSING,
                                     &d3dpp, &pd3dDevice);
     if (FAILED(hr)) {
-        xdkLog("BS: FATAL: CreateDevice failed\n");
-        shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
+        DbgPrint("BS: FATAL: CreateDevice failed\n");
         return;
     }
-    xdkLog("BS: D3D device created\n");
+    DbgPrint("BS: D3D device created\n");
 
 
     // ===[ Locate data.win ]===
@@ -312,54 +114,26 @@ VOID __cdecl main() {
         NULL,
     };
 
-    // A game_change (e.g. Deltarune's chapter select) relaunches this XEX with
-    // the next data.win in the launch data; otherwise search the usual places.
-    static char launchPath[520]; // "path\0arguments\0" from xdkPrepareGameChange
-    const char* launchArgs = NULL;
-    DWORD launchSize = 0;
-    if (XGetLaunchDataSize(&launchSize) == ERROR_SUCCESS && launchSize > 0 && launchSize <= sizeof(launchPath) &&
-        XGetLaunchData(launchPath, sizeof(launchPath)) == ERROR_SUCCESS) {
-        launchPath[sizeof(launchPath) - 1] = '\0';
-        size_t pathSize = strlen(launchPath) + 1;
-        if (pathSize < launchSize) launchArgs = launchPath + pathSize;
-        FILE* testFile = fopen(launchPath, "rb");
-        if (testFile) {
-            fclose(testFile);
-            dataWinPath = launchPath;
-            xdkLog("BS: game_change target %s\n", dataWinPath);
-        }
-    }
-
-    xdkLog("BS: searching for data.win\n");
+    DbgPrint("BS: searching for data.win\n");
     char msg[256];
-    for (int i = 0; !dataWinPath && searchPaths[i]; i++) {
-        xdkLog("BS: trying %s\n", searchPaths[i]);
+    for (int i = 0; searchPaths[i]; i++) {
+        DbgPrint("BS: trying %s\n", searchPaths[i]);
 
         FILE* testFile = fopen(searchPaths[i], "rb");
         if (testFile) {
             fclose(testFile);
             dataWinPath = searchPaths[i];
-            xdkLog("BS: found data.win at %s\n", dataWinPath);
+            DbgPrint("BS: found data.win at %s\n", dataWinPath);
             break;
         }
     }
 
     if (!dataWinPath) {
-        xdkLog("BS: FATAL: data.win not found\n");
-        shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
-        return;
-    }
-    if (strlen(dataWinPath) < sizeof(g_d3d9DataWinPath)) strcpy(g_d3d9DataWinPath, dataWinPath);
-    { // Each data.win (e.g. every Deltarune chapter) has its own shaders\ folder.
-        const char* slash = strrchr(dataWinPath, '\\');
-        size_t dirLen = slash ? (size_t)(slash - dataWinPath + 1) : 0;
-        if (dirLen + 9 < sizeof(g_d3d9ShaderDir)) {
-            memcpy(g_d3d9ShaderDir, dataWinPath, dirLen);
-            strcpy(g_d3d9ShaderDir + dirLen, "shaders\\");
-        }
+        DbgPrint("BS: FATAL: data.win not found\n");
+        for (;;) { } // hang instead of crash for debugging
     }
 
-    { MEMORYSTATUS m0; GlobalMemoryStatus(&m0); xdkLog("BS: parsing data.win (free=%uMB)\n", (unsigned)(m0.dwAvailPhys >> 20)); }
+    DbgPrint("BS: parsing data.win\n");
 
     DataWinParserOptions parseOpts;
     memset(&parseOpts, 0, sizeof(parseOpts));
@@ -368,33 +142,19 @@ VOID __cdecl main() {
     parseOpts.parseSprt = true;  parseOpts.parseBgnd = true;  parseOpts.parsePath = true;
     parseOpts.parseScpt = true;  parseOpts.parseGlob = true;  parseOpts.parseShdr = true;
     parseOpts.parseFont = true;  parseOpts.parseTmln = true;  parseOpts.parseObjt = true;
-    parseOpts.parseRoom = true;  parseOpts.parseTgin = true;  parseOpts.parseTpag = true;  parseOpts.parseCode = true;
+    parseOpts.parseRoom = true;  parseOpts.parseTpag = true;  parseOpts.parseCode = true;
     parseOpts.parseVari = true;  parseOpts.parseFunc = true;  parseOpts.parseStrg = true;
     parseOpts.parseTxtr = true;  parseOpts.parseAudo = true;
     parseOpts.skipLoadingPreciseMasksForNonPreciseSprites = true;
-    // 512 MB is shared by CPU and GPU: read texture/audio blobs and rooms from disk on demand
-    // instead of keeping the whole data.win (126 MB for Deltarune Ch3) resident.
-    parseOpts.lazyLoadTextures = true;
-    parseOpts.lazyLoadAudio = true;
-    parseOpts.lazyLoadRooms = true;
     DataWin* dataWin = DataWin_parse(dataWinPath, parseOpts);
 
     if (!dataWin) {
-        xdkLog("BS: FATAL: DataWin_parse returned NULL\n");
-        shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
-        return;
+        DbgPrint("BS: FATAL: DataWin_parse returned NULL\n");
+        for (;;) { }
     }
-    { // Compressed texture/audio data kept in RAM (lazy loading keeps this near zero).
-        uint64_t texBytes = 0, audioBytes = 0;
-        for (uint32_t i = 0; i < dataWin->txtr.count; i++)
-            if (dataWin->txtr.textures[i].blobData) texBytes += dataWin->txtr.textures[i].blobSize;
-        for (uint32_t i = 0; i < dataWin->audo.count; i++)
-            if (dataWin->audo.entries[i].data) audioBytes += dataWin->audo.entries[i].dataSize;
-        xdkLog("BS: data.win parsed OK (resident blobs: textures %uMB, audio %uMB)\n",
-               (unsigned)(texBytes >> 20), (unsigned)(audioBytes >> 20));
-    }
+    DbgPrint("BS: data.win parsed OK\n");
 
-    xdkLog("BS: game=%s\n", dataWin->gen8.displayName ? dataWin->gen8.displayName : "Unknown");
+    DbgPrint("BS: game=%s\n", dataWin->gen8.displayName ? dataWin->gen8.displayName : "Unknown");
 
     // ===[ Load CONFIG.JSN (optional) ]===
     char configPath[512];
@@ -413,97 +173,32 @@ VOID __cdecl main() {
                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hConfig != INVALID_HANDLE_VALUE) {
         DWORD configSize = GetFileSize(hConfig, NULL);
-        // CONFIG.JSN is optional and small. Reject invalid/oversized files
-        // rather than allocating from an unchecked DWORD or parsing a partial read.
-        if (configSize != INVALID_FILE_SIZE && configSize <= 1024U * 1024U) {
-            char* configText = (char*)malloc((size_t)configSize + 1);
-            if (configText) {
-                DWORD bytesRead = 0;
-                BOOL readOk = ReadFile(hConfig, configText, configSize, &bytesRead, NULL);
-                if (readOk && bytesRead == configSize) {
-                    configText[bytesRead] = '\0';
-                    configRoot = JsonReader_parse(configText);
-                    if (configRoot) xdkLog("Loaded CONFIG.JSN\n");
-                } else {
-                    xdkLog("Ignoring unreadable CONFIG.JSN\n");
-                }
-                free(configText);
-            } else {
-                xdkLog("Ignoring CONFIG.JSN: out of memory\n");
-            }
-        } else {
-            xdkLog("Ignoring invalid or oversized CONFIG.JSN\n");
-        }
+        char* configText = (char*)malloc(configSize + 1);
+        DWORD bytesRead;
+        ReadFile(hConfig, configText, configSize, &bytesRead, NULL);
         CloseHandle(hConfig);
+        configText[bytesRead] = '\0';
+        configRoot = JsonReader_parse(configText);
+        free(configText);
+        OutputDebugStringA("Loaded CONFIG.JSN\n");
     }
 
     // ===[ Create Subsystems ]===
-    xdkLog("BS: creating subsystems\n");
+    DbgPrint("BS: creating subsystems\n");
     XdkFileSystem* xdkFs = XdkFileSystem_create(dataWinPath);
     FileSystem* fileSystem = (FileSystem*)xdkFs;
 
-    xdkLog("BS: creating renderer\n");
+    DbgPrint("BS: creating renderer\n");
     Renderer* renderer = D3D9Renderer_create(pd3dDevice);
-    if (renderer && configRoot) { // CONFIG.JSN: "compressTextures": true compresses every page
-        JsonValue* compress = JsonReader_getJsonValueByKey(configRoot, "compressTextures");
-        if (compress && JsonReader_isBool(compress))
-            ((D3D9Renderer*)renderer)->compressTextures = JsonReader_getBool(compress);
-    }
 
-    xdkLog("BS: creating VM\n");
+    DbgPrint("BS: creating VM\n");
     VMContext* vm = VM_create(dataWin);
-    // CONFIG.JSN "disassemble": ["gml_Object_x_Draw_0", ...] dumps those scripts to the log
-    JsonValue* disasm = configRoot ? JsonReader_getJsonValueByKey(configRoot, "disassemble") : NULL;
-    if (vm && disasm && JsonReader_isArray(disasm)) {
-        VM_buildCrossReferences(vm);
-        for (int i = 0; i < JsonReader_arrayLength(disasm); i++) {
-            const char* name = JsonReader_getString(JsonReader_getArrayElement(disasm, i));
-            ptrdiff_t idx = name ? shgeti(vm->codeIndexByName, (char*)name) : -1;
-            if (idx >= 0) VM_disassemble(vm, vm->codeIndexByName[idx].value);
-            else xdkLog("BS: disassemble: '%s' not found\n", name ? name : "?");
-        }
-    }
-
-    xdkLog("BS: creating audio system\n");
-    XdkAudioSystem* xdkAudio = XdkAudioSystem_create();
-    AudioSystem* audioSystem = (AudioSystem*)xdkAudio;
-
-    if (!xdkFs || !renderer || !vm || !xdkAudio) {
-        xdkLog("BS: FATAL: subsystem allocation failed (fs=%d renderer=%d vm=%d audio=%d)\n",
-                 xdkFs != NULL, renderer != NULL, vm != NULL, xdkAudio != NULL);
-        shutdownXdk(NULL, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
-        return;
-    }
-
-    xdkLog("BS: creating modern runner\n");
-    Runner* runner = Runner_create(dataWin, vm, renderer, fileSystem, audioSystem, 0);
-    if (!runner) {
-        xdkLog("BS: FATAL: Runner_create returned NULL\n");
-        shutdownXdk(NULL, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
-        return;
-    }
-    // parameter_count()/parameter_string(): argv[0] like the PC runner, then any
-    // game_change arguments (Deltarune chapters check "launcher", "returning_N").
-    arrput(runner->gameArgs, _strdup(dataWinPath));
-    if (launchArgs && launchArgs[0]) {
-        char args[256];
-        snprintf(args, sizeof(args), "%s", launchArgs);
-        for (char* tok = strtok(args, " "); tok; tok = strtok(NULL, " ")) arrput(runner->gameArgs, _strdup(tok));
-    }
-    if (!((D3D9Renderer*)renderer)->initialized) {
-        xdkLog("BS: FATAL: D3D9 renderer initialization failed\n");
-        shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
-        return;
-    }
-    if (!xdkAudio->initialized) {
-        xdkLog("BS: FATAL: XAudio2 initialization failed\n");
-        shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
-        return;
-    }
+    DbgPrint("BS: creating runner\n");
+    Runner* runner = Runner_create(dataWin, vm, fileSystem);
 
     // Parse CONFIG.JSN options
     if (configRoot) {
-        JsonValue* disabledArr = JsonReader_getJsonValueByKey(configRoot, "disabledObjects");
+        JsonValue* disabledArr = JsonReader_getObject(configRoot, "disabledObjects");
         if (disabledArr && JsonReader_isArray(disabledArr)) {
             sh_new_strdup(runner->disabledObjects);
             int count = JsonReader_arrayLength(disabledArr);
@@ -516,101 +211,101 @@ VOID __cdecl main() {
             }
         }
 
-        JsonValue* mappingsObj = JsonReader_getJsonValueByKey(configRoot, "controllerMappings");
+        JsonValue* mappingsObj = JsonReader_getObject(configRoot, "controllerMappings");
         if (mappingsObj && JsonReader_isObject(mappingsObj)) {
-            int count = JsonReader_objectLength(mappingsObj);
-            xpadMappings = count > 0 ? (XpadMapping*)malloc(sizeof(XpadMapping) * count) : NULL;
-            xpadMappingCount = 0;
-            for (int i = 0; xpadMappings && i < count; i++) {
-                const char* btnStr = JsonReader_getJsonKeyByIndex(mappingsObj, i);
-                JsonValue* gmlVal = JsonReader_getJsonValueByIndex(mappingsObj, i);
-                if (!btnStr || !gmlVal) continue;
-                xpadMappings[xpadMappingCount].xpadButton = (WORD)atoi(btnStr);
-                xpadMappings[xpadMappingCount].gmlKey = (int32_t)JsonReader_getInt(gmlVal);
-                xpadMappingCount++;
+            xpadMappingCount = JsonReader_objectLength(mappingsObj);
+            xpadMappings = (XpadMapping*)malloc(sizeof(XpadMapping) * xpadMappingCount);
+            for (int i = 0; i < xpadMappingCount; i++) {
+                const char* btnStr = JsonReader_getObjectKey(mappingsObj, i);
+                JsonValue* gmlVal = JsonReader_getObjectValue(mappingsObj, i);
+                xpadMappings[i].xpadButton = (WORD)atoi(btnStr);
+                xpadMappings[i].gmlKey = (int32_t)JsonReader_getInt(gmlVal);
             }
-            // Empty or unusable custom mappings fall back to the defaults below.
-            if (xpadMappingCount == 0) { free(xpadMappings); xpadMappings = NULL; }
         }
     }
 
     if (!xpadMappings) setupDefaultMappings();
 
-    // Runner_create owns renderer/audio initialization in the modern runtime.
+    runner->renderer = renderer;
+
+    // Initialize audio
+    DbgPrint("BS: creating audio\n");
+    XdkAudioSystem* xdkAudio = XdkAudioSystem_create();
+    AudioSystem* audioSystem = (AudioSystem*)xdkAudio;
+    audioSystem->vtable->init(audioSystem, dataWin, fileSystem);
+    runner->audioSystem = audioSystem;
+    DbgPrint("BS: audio OK\n");
+
+    // Initialize renderer
+    DbgPrint("BS: init renderer\n");
+    renderer->vtable->init(renderer, dataWin);
+    DbgPrint("BS: renderer OK\n");
 
     // Initialize first room
-    xdkLog("BS: init first room\n");
+    DbgPrint("BS: init first room\n");
     Runner_initFirstRoom(runner);
-    xdkLog("BS: first room OK\n");
+    DbgPrint("BS: first room OK\n");
 
     Gen8* gen8 = &dataWin->gen8;
     int32_t gameW = (int32_t)gen8->defaultWindowWidth;
     int32_t gameH = (int32_t)gen8->defaultWindowHeight;
-    xdkLog("BS: gameW=%d gameH=%d screenW=%d screenH=%d\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
+    DbgPrint("BS: gameW=%d gameH=%d screenW=%d screenH=%d\n", gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    xdkLog("BS: entering modern main loop\n");
-
-    LARGE_INTEGER freq, lastTime, currentTime;
-    if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0 ||
-        !QueryPerformanceCounter(&lastTime)) {
-        xdkLog("BS: FATAL: performance counter unavailable\n");
-        shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
-        return;
+    // Parse deferDrawToAfterAllSteps
+    bool deferDraw = false;
+    if (configRoot) {
+        JsonValue* deferVal = JsonReader_getObject(configRoot, "deferDrawToAfterAllSteps");
+        if (deferVal) deferDraw = JsonReader_getBool(deferVal);
     }
+
+    DbgPrint("BS: entering main loop\n");
+
+    // ===[ Main Loop ]===
+    LARGE_INTEGER freq, lastTime, currentTime;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&lastTime);
     double accumulator = 0.0;
-    double perfStepMs = 0.0, perfDrawMs = 0.0, perfPresentMs = 0.0;
-    int perfFrames = 0, perfSteps = 0;
 
     while (!runner->shouldExit) {
-        if (runner->pendingLaunchParameters) { // game_change: restart as a fresh process, like GameMaker
-            xdkPrepareGameChange(runner);
-            break;
-        }
-        if (!QueryPerformanceCounter(&currentTime)) {
-            xdkLog("BS: performance counter query failed; stopping main loop\n");
-            break;
-        }
+        QueryPerformanceCounter(&currentTime);
         double deltaTime = (double)(currentTime.QuadPart - lastTime.QuadPart) / (double)freq.QuadPart;
         lastTime = currentTime;
-        if (deltaTime < 0.0) deltaTime = 0.0;
-        if (deltaTime > 0.25) deltaTime = 0.25;
 
-        // Poll XInput. Treat a disconnected controller as neutral so keys do not stick.
+        // ===[ Poll Controller ]===
         XINPUT_STATE state;
-        memset(&state, 0, sizeof(state));
-        WORD buttons = 0;
-        bool controllerConnected = XInputGetState(0, &state) == ERROR_SUCCESS;
-        if (controllerConnected) {
-            buttons = state.Gamepad.wButtons;
+        if (XInputGetState(0, &state) == ERROR_SUCCESS) {
+            WORD buttons = state.Gamepad.wButtons;
 
-            const SHORT deadzone = 16384;
+            // Left thumbstick as dpad
+            #define STICK_DEADZONE 16384
             SHORT lx = state.Gamepad.sThumbLX;
             SHORT ly = state.Gamepad.sThumbLY;
-            if (lx < -deadzone) buttons |= XINPUT_GAMEPAD_DPAD_LEFT;
-            if (lx >  deadzone) buttons |= XINPUT_GAMEPAD_DPAD_RIGHT;
-            if (ly >  deadzone) buttons |= XINPUT_GAMEPAD_DPAD_UP;
-            if (ly < -deadzone) buttons |= XINPUT_GAMEPAD_DPAD_DOWN;
+            if (lx < -STICK_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_LEFT;
+            if (lx >  STICK_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_RIGHT;
+            if (ly >  STICK_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_UP;
+            if (ly < -STICK_DEADZONE) buttons |= XINPUT_GAMEPAD_DPAD_DOWN;
+
+            for (int i = 0; i < xpadMappingCount; i++) {
+                WORD mask = xpadMappings[i].xpadButton;
+                int32_t gmlKey = xpadMappings[i].gmlKey;
+
+                bool wasPressed = (prevButtons & mask) != 0;
+                bool isPressed = (buttons & mask) != 0;
+
+                if (isPressed && !wasPressed)
+                    RunnerKeyboard_onKeyDown(runner->keyboard, gmlKey);
+                else if (!isPressed && wasPressed)
+                    RunnerKeyboard_onKeyUp(runner->keyboard, gmlKey);
+            }
+            prevButtons = buttons;
             prevRightTrigger = state.Gamepad.bRightTrigger;
-        } else {
-            prevRightTrigger = 0;
         }
-
-        for (int i = 0; i < xpadMappingCount; i++) {
-            WORD mask = xpadMappings[i].xpadButton;
-            int32_t gmlKey = xpadMappings[i].gmlKey;
-            bool wasPressed = (prevButtons & mask) != 0;
-            bool isPressed = (buttons & mask) != 0;
-
-            if (isPressed && !wasPressed)
-                RunnerKeyboard_onKeyDown(runner->keyboard, gmlKey);
-            else if (!isPressed && wasPressed)
-                RunnerKeyboard_onKeyUp(runner->keyboard, gmlKey);
-        }
-        prevButtons = buttons;
 
         bool speedCapRemoved = prevRightTrigger > 128;
-        double gameSpeed = (double)Runner_getEffectiveGameSpeed(runner);
-        double targetFrameTime = gameSpeed > 0.0 ? (1.0 / gameSpeed) : (1.0 / 60.0);
+
+        // ===[ Frame Pacing ]===
+        uint32_t roomSpeed = runner->currentRoom->speed;
+        double targetFrameTime = (roomSpeed > 0) ? (1.0 / roomSpeed) : (1.0 / 60.0);
 
         accumulator += deltaTime;
         double maxAccumulator = targetFrameTime * 4.0;
@@ -618,90 +313,107 @@ VOID __cdecl main() {
         if (speedCapRemoved && targetFrameTime > accumulator) accumulator = targetFrameTime;
 
         int gameFramesRan = 0;
-        double perfT0 = _xdk_monotonic_ms();
-        while (accumulator >= targetFrameTime && !runner->shouldExit) {
-            if (gameFramesRan > 0) RunnerKeyboard_beginFrame(runner->keyboard);
-            updateNativeGamepad(runner, &state.Gamepad, controllerConnected);
-            // delta_time (microseconds): fixed step, so time-driven code (e.g. Deltarune
-            // Ch5's music-synced pillars/lyrics) advances in step with the game.
-            runner->deltaTime = (GMLReal)(targetFrameTime * 1000000.0);
+        while (accumulator >= targetFrameTime) {
+            if (gameFramesRan > 0)
+                RunnerKeyboard_beginFrame(runner->keyboard);
+
             Runner_step(runner);
+
+            if (!deferDraw) {
+                renderer->vtable->beginFrame(renderer, gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+                Room* activeRoom = runner->currentRoom;
+                bool anyViewRendered = false;
+                bool viewsEnabled = (activeRoom->flags & 1) != 0;
+
+                if (viewsEnabled) {
+                    for (int vi = 0; vi < 8; vi++) {
+                        if (!activeRoom->views[vi].enabled) continue;
+                        runner->viewCurrent = vi;
+                        renderer->vtable->beginView(renderer,
+                            activeRoom->views[vi].viewX, activeRoom->views[vi].viewY,
+                            activeRoom->views[vi].viewWidth, activeRoom->views[vi].viewHeight,
+                            activeRoom->views[vi].portX, activeRoom->views[vi].portY,
+                            activeRoom->views[vi].portWidth, activeRoom->views[vi].portHeight,
+                            runner->viewAngles[vi]);
+                        Runner_draw(runner);
+                        renderer->vtable->endView(renderer);
+                        anyViewRendered = true;
+                    }
+                }
+
+                if (!anyViewRendered) {
+                    runner->viewCurrent = 0;
+                    renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
+                    Runner_draw(runner);
+                    renderer->vtable->endView(renderer);
+                }
+
+                runner->viewCurrent = 0;
+                renderer->vtable->endFrame(renderer);
+            }
+
             accumulator -= targetFrameTime;
             gameFramesRan++;
         }
-        double perfT1 = _xdk_monotonic_ms();
-        perfStepMs += perfT1 - perfT0;
-        perfSteps += gameFramesRan;
 
-        // Render once after catch-up steps. This follows the modern renderer lifecycle:
-        // draw-pre -> application surface/views -> draw-post -> GUI -> present.
-        if (gameFramesRan > 0 && !runner->shouldExit) {
-            gameW = runner->applicationWidth > 0 ? runner->applicationWidth : (int32_t)gen8->defaultWindowWidth;
-            gameH = runner->applicationHeight > 0 ? runner->applicationHeight : (int32_t)gen8->defaultWindowHeight;
+        // Deferred draw: render once after all catch-up steps
+        if (deferDraw && gameFramesRan > 0) {
+            renderer->vtable->beginFrame(renderer, gameW, gameH, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-            Runner_beginFrame(runner, gameW, gameH,
-                              SCREEN_WIDTH, SCREEN_HEIGHT,
-                              SCREEN_WIDTH, SCREEN_HEIGHT);
-            // The XDK backend currently aliases application_surface to the host
-            // framebuffer. Clear it once before Draw Pre, then preserve that
-            // pass when Runner_drawViews performs its normal clear callback.
-            renderer->vtable->clearScreen(renderer,
-                runner->drawBackgroundColor ? runner->backgroundColor : 0, 1.0f);
-            Runner_drawPre(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
-            // Suppress only Runner_drawViews' own initial clear, after any
-            // intentional clear calls made by Draw Pre have already run.
-            ((D3D9Renderer*)renderer)->skipNextClearScreen = true;
-            Runner_drawViews(runner, gameW, gameH, false);
-            renderer->vtable->endFrameInit(renderer);
-            Runner_drawPost(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
-            renderer->vtable->endFrameEnd(renderer);
-            Runner_drawGUI(runner, SCREEN_WIDTH, SCREEN_HEIGHT, gameW, gameH);
-            double perfT2 = _xdk_monotonic_ms();
-            platformSwapBuffers((D3D9Renderer*)renderer);
-            double perfT3 = _xdk_monotonic_ms();
-            perfDrawMs += perfT2 - perfT1;
-            perfPresentMs += perfT3 - perfT2;
-            // Every 60 rendered frames: where the time goes (game logic vs CPU draw vs GPU present).
-            if (++perfFrames == 60) {
-                MEMORYSTATUS mem;
-                GlobalMemoryStatus(&mem);
-                xdkLog("BS perf: per frame step=%.1fms (%d steps) draw=%.1fms present=%.1fms free=%uMB textures=%uMB\n",
-                       perfStepMs / 60.0, perfSteps, perfDrawMs / 60.0, perfPresentMs / 60.0,
-                       (unsigned)(mem.dwAvailPhys / (1024 * 1024)),
-                       ((D3D9Renderer*)renderer)->textureBytesAllocated >> 20);
-                perfStepMs = perfDrawMs = perfPresentMs = 0.0;
-                perfFrames = perfSteps = 0;
+            Room* activeRoom = runner->currentRoom;
+            bool anyViewRendered = false;
+            bool viewsEnabled = (activeRoom->flags & 1) != 0;
+
+            if (viewsEnabled) {
+                for (int vi = 0; vi < 8; vi++) {
+                    if (!activeRoom->views[vi].enabled) continue;
+                    runner->viewCurrent = vi;
+                    renderer->vtable->beginView(renderer,
+                        activeRoom->views[vi].viewX, activeRoom->views[vi].viewY,
+                        activeRoom->views[vi].viewWidth, activeRoom->views[vi].viewHeight,
+                        activeRoom->views[vi].portX, activeRoom->views[vi].portY,
+                        activeRoom->views[vi].portWidth, activeRoom->views[vi].portHeight,
+                        runner->viewAngles[vi]);
+                    Runner_draw(runner);
+                    renderer->vtable->endView(renderer);
+                    anyViewRendered = true;
+                }
             }
 
-            Runner_handlePendingRoomChange(runner);
+            if (!anyViewRendered) {
+                runner->viewCurrent = 0;
+                renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, 0, 0, gameW, gameH, 0.0f);
+                Runner_draw(runner);
+                renderer->vtable->endView(renderer);
+            }
+
+            runner->viewCurrent = 0;
+            renderer->vtable->endFrame(renderer);
+        }
+
+        // Update audio
+        if (runner->audioSystem) {
+            float dt = (float)deltaTime;
+            if (dt < 0.0f) dt = 0.0f;
+            if (dt > 0.1f) dt = 0.1f;
+            runner->audioSystem->vtable->update(runner->audioSystem, dt);
+        }
+
+        if (gameFramesRan > 0) {
             RunnerKeyboard_beginFrame(runner->keyboard);
-        }
-
-        if (audioSystem && audioSystem->vtable && audioSystem->vtable->update) {
-            float audioDelta = (float)deltaTime;
-            if (audioDelta > 0.1f) audioDelta = 0.1f;
-            audioSystem->vtable->update(audioSystem, audioDelta);
-        }
-
-        // Avoid a full-speed busy loop when the room speed is low.
-        if (!speedCapRemoved && accumulator < targetFrameTime) {
-            DWORD sleepMs = (DWORD)((targetFrameTime - accumulator) * 1000.0);
-            if (sleepMs > 0) Sleep(sleepMs > 2 ? sleepMs - 1 : sleepMs);
         }
     }
 
     // ===[ Cleanup ]===
-    // game_change relaunches without teardown: XLaunchNewImage replaces the whole
-    // process, and freeing the runner first crashed on freed memory (0xFEEEFEEE).
-    if (g_nextGame[0]) { // relaunch ourselves for the next data.win; does not return on success
-        char launchData[520]; // "path\0arguments\0"
-        size_t pathSize = strlen(g_nextGame) + 1, argsSize = strlen(g_nextArgs) + 1;
-        memcpy(launchData, g_nextGame, pathSize);
-        memcpy(launchData + pathSize, g_nextArgs, argsSize);
-        XSetLaunchData(launchData, (DWORD)(pathSize + argsSize));
-        XLaunchNewImage("game:\\default.xex", 0);
-        xdkLog("BS: XLaunchNewImage failed\n");
+    if (runner->audioSystem) {
+        runner->audioSystem->vtable->destroy(runner->audioSystem);
+        runner->audioSystem = NULL;
     }
-    xdkLog("BS: shutting down runner\n");
-    shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
+    renderer->vtable->destroy(renderer);
+    DataWin_free(dataWin);
+    pd3dDevice->Release();
+    pD3D->Release();
+
+    free(xpadMappings);
 }
