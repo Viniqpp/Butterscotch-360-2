@@ -1,8 +1,11 @@
-#pragma once
+#ifndef _BS_BINARY_READER_H_
+#define _BS_BINARY_READER_H_
 
+#include "common.h"
 #include <stdint.h>
 #include <stddef.h>
-#include <stdio.h>
+#include "stdio_compat.h"
+#include <stdbool.h>
 
 typedef struct {
     FILE* file;
@@ -33,6 +36,7 @@ int32_t BinaryReader_readInt32(BinaryReader* reader);
 uint32_t BinaryReader_readUint32(BinaryReader* reader);
 float BinaryReader_readFloat32(BinaryReader* reader);
 uint64_t BinaryReader_readUint64(BinaryReader* reader);
+int64_t BinaryReader_readInt64(BinaryReader* reader);
 bool BinaryReader_readBool32(BinaryReader* reader);
 
 // Copies 'count' bytes from the current position into 'dest'.
@@ -45,3 +49,5 @@ uint8_t* BinaryReader_readBytesAt(BinaryReader* reader, size_t offset, size_t co
 void BinaryReader_skip(BinaryReader* reader, size_t bytes);
 void BinaryReader_seek(BinaryReader* reader, size_t position);
 size_t BinaryReader_getPosition(BinaryReader* reader);
+
+#endif /* _BS_BINARY_READER_H_ */
