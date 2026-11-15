@@ -451,6 +451,17 @@ VOID __cdecl main() {
 
     xdkLog("BS: creating VM\n");
     VMContext* vm = VM_create(dataWin);
+    // CONFIG.JSN "disassemble": ["gml_Object_x_Draw_0", ...] dumps those scripts to the log
+    JsonValue* disasm = configRoot ? JsonReader_getJsonValueByKey(configRoot, "disassemble") : NULL;
+    if (vm && disasm && JsonReader_isArray(disasm)) {
+        VM_buildCrossReferences(vm);
+        for (int i = 0; i < JsonReader_arrayLength(disasm); i++) {
+            const char* name = JsonReader_getString(JsonReader_getArrayElement(disasm, i));
+            ptrdiff_t idx = name ? shgeti(vm->codeIndexByName, (char*)name) : -1;
+            if (idx >= 0) VM_disassemble(vm, vm->codeIndexByName[idx].value);
+            else xdkLog("BS: disassemble: '%s' not found\n", name ? name : "?");
+        }
+    }
 
     xdkLog("BS: creating audio system\n");
     XdkAudioSystem* xdkAudio = XdkAudioSystem_create();
