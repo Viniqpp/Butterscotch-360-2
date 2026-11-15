@@ -136,6 +136,7 @@ static void ensureTexture(D3D9Renderer* dr, int32_t textureIndex) {
 
 // Public texture handles are TPAG handles (index + 1), not raw TXTR page IDs.
 static void* d3d9Page(D3D9Renderer* dr, int32_t page);
+static void* d3d9PageEx(D3D9Renderer* dr, int32_t page, bool wait);
 
 static int32_t d3d9TextureHandleToPage(D3D9Renderer* dr, uint32_t textureHandle) {
     if (textureHandle >= D3D9_SURFACE_HANDLE) { // surface_get_texture
@@ -148,7 +149,7 @@ static int32_t d3d9TextureHandleToPage(D3D9Renderer* dr, uint32_t textureHandle)
     if (tpagIndex >= dw->tpag.count) return -1;
     int32_t page = dw->tpag.items[tpagIndex].texturePageId;
     if (page < 0 || (uint32_t)page >= dr->textureCount ||
-        !d3d9Page(dr, page)) return -1;
+        !d3d9PageEx(dr, page, true)) return -1;
     return page;
 }
 
@@ -163,8 +164,21 @@ static SpriteVertex* allocQuad(D3D9Renderer* dr) {
 
 // Transform a world-space point to back-buffer pixels through the active GML matrices.
 // shortcut: ignores clip-space w, so d3d perspective projections draw as orthographic; add a w-divide if a 3D game needs it.
+// Full homogeneous transform: d3d_set_projection / perspective cameras give w != 1.
+// shortcut: the divide is done on the CPU, so textures under perspective are
+// interpolated affinely and points behind the camera are not clipped.
+static inline void transformPoint3(D3D9Renderer* dr, float x, float y, float z, float* outX, float* outY) {
+    const float* m = dr->screenTransform.m;
+    float w = m[3] * x + m[7] * y + m[11] * z + m[15];
+    float sx = m[0] * x + m[4] * y + m[8] * z + m[12];
+    float sy = m[1] * x + m[5] * y + m[9] * z + m[13];
+    if (w != 1.0f && fabsf(w) > 1e-6f) { sx /= w; sy /= w; }
+    *outX = sx;
+    *outY = sy;
+}
+
 static inline void transformPoint(D3D9Renderer* dr, float inX, float inY, float* outX, float* outY) {
-    Matrix4f_transformPoint(&dr->screenTransform, inX, inY, outX, outY);
+    transformPoint3(dr, inX, inY, 0.0f, outX, outY);
 }
 
 // screenTransform = NDC->viewport pixels * WVP; see d3d9_transform.h for the Y convention.
@@ -285,170 +299,264 @@ static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes, uint32_t limit) {
     return true;
 }
 
-// DXT5 page: 1 byte per texel instead of 4, so about 4x more pages fit the
-// budget (Deltarune Ch5 battles need more than 16 uncompressed 2048^2 pages).
-// Alpha keeps full DXT5 precision; colour is block-compressed (lossy).
-static IDirect3DTexture9* d3d9CreateDxtTexture(D3D9Renderer* dr, uint32_t page, uint8_t* rgba,
-                                               int w, int h, uint32_t* outBytes) {
-    // In place to the 0xAARRGGBB words XGCompressSurface reads as LIN_A8R8G8B8.
-    // Transparent texels take the last visible colour in their row: DXT colour
-    // blocks would otherwise bleed black into sprite edges.
-    DWORD* words = (DWORD*)rgba;
+// ===[ Texture pages ]===
+// Pages are decoded (PNG / QOI / BZip2+QOI) on worker threads into their final
+// upload format, so the frame never waits for a decode: a page that is not
+// ready yet is skipped for a frame or two (sprites pop in instead of the game
+// freezing). Only the upload (one memcpy into the texture) runs on the main thread.
+
+#define D3D9_LOADER_THREADS 3 // Xenon hardware threads 2-4; 0 runs the game, 1 and 5 stay free for audio/system
+
+enum { D3D9_PAGE_IDLE, D3D9_PAGE_QUEUED, D3D9_PAGE_READY, D3D9_PAGE_BAD };
+
+typedef struct {
+    CRITICAL_SECTION lock;
+    HANDLE wake; // semaphore: one count per queued page
+    HANDLE threads[D3D9_LOADER_THREADS];
+    volatile bool quit;
+    bool qoiTitle; // GMS 2022.5+: BZip2+QOI blobs
+    DataWin* dw;
+    uint32_t* queue; // ring of page ids; a page is queued at most once
+    uint32_t head, tail, cap;
+    uint8_t* state;
+    uint8_t* dxt;    // requested format per page
+    uint8_t** out;   // decoded page in upload format
+    int32_t* outW;
+    int32_t* outH;
+} D3D9Loader;
+
+// CPU half of a page load (any thread). Returns ARGB words (linear) or DXT5 blocks.
+static uint8_t* d3d9DecodePage(const uint8_t* blob, uint32_t size, bool qoiTitle, bool dxt,
+                               int* outW, int* outH) {
+    int w = 0, h = 0;
+    uint8_t* rgba = ImageDecoder_decodeToRgba((uint8_t*)blob, size, qoiTitle, &w, &h);
+    if (!rgba) return NULL;
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) { free(rgba); return NULL; }
+    *outW = w; *outH = h;
+    DWORD* words = (DWORD*)rgba; // in place: RGBA bytes -> 0xAARRGGBB words
     for (int y = 0; y < h; y++) {
         DWORD carry = 0;
         for (int x = 0; x < w; x++) {
             uint8_t* p = rgba + ((size_t)y * w + x) * 4;
-            DWORD word = p[3] ? D3DCOLOR_ARGB(p[3], p[0], p[1], p[2]) : (carry & 0x00FFFFFF);
-            if (p[3]) carry = word;
+            DWORD word = p[3] ? D3DCOLOR_ARGB(p[3], p[0], p[1], p[2]) : 0;
+            // DXT: transparent texels take the last visible colour in their row,
+            // or colour blocks bleed black into sprite edges.
+            if (dxt) { if (p[3]) carry = word; else word = carry & 0x00FFFFFF; }
             words[(size_t)y * w + x] = word;
         }
     }
-    if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h, dr->maxTextureBytes)) {
-        logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
-                page, dr->textureBytesAllocated >> 20);
-        return NULL;
+    if (!dxt || w % 4 || h % 4) return rgba;
+    uint8_t* blocks = (uint8_t*)malloc((size_t)w * h); // DXT5: 16 bytes per 4x4 block
+    if (blocks && FAILED(XGCompressSurface(blocks, (UINT)w * 4, w, h, D3DFMT_LIN_DXT5, NULL,
+                                           rgba, (UINT)w * 4, D3DFMT_LIN_A8R8G8B8, NULL, 0, 0.0f))) {
+        free(blocks);
+        blocks = NULL;
     }
-    IDirect3DDevice9* dev = Dev(dr);
-    IDirect3DTexture9* tex = NULL;
-    HRESULT hr = dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_DXT5, D3DPOOL_DEFAULT, &tex, NULL);
-    D3DLOCKED_RECT lr;
-    if (SUCCEEDED(hr) && tex) hr = tex->LockRect(0, &lr, NULL, 0);
-    if (SUCCEEDED(hr) && tex) {
-        hr = XGCompressSurface(lr.pBits, lr.Pitch, w, h, D3DFMT_LIN_DXT5, NULL,
-                               rgba, (UINT)w * 4, D3DFMT_LIN_A8R8G8B8, NULL, 0, 0.0f);
-        HRESULT unlockHr = tex->UnlockRect(0);
-        if (SUCCEEDED(hr)) hr = unlockHr;
-        *outBytes = (uint32_t)lr.Pitch * (uint32_t)(h / 4); // one pitch per 4-texel block row
-    }
-    if (FAILED(hr) || !tex) {
-        logWarn("D3D9: DXT upload failed for page %u (hr=0x%08X)\n", page, (unsigned)hr);
-        if (tex) tex->Release();
-        return NULL;
-    }
-    return tex;
+    if (!blocks) return rgba; // fall back to the uncompressed page
+    free(rgba);
+    *outW = -w; // negative width marks DXT data for the upload
+    return blocks;
 }
 
-// Decodes and uploads one TXTR page (PNG, QOI or BZip2+QOI).
-static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
-    IDirect3DDevice9* dev = Dev(dr);
-        Texture* txtr = &dr->base.dataWin->txtr.textures[i];
-        DataWin_loadTxtrIfNeeded(dr->base.dataWin, i);
-        if (!txtr->blobData || txtr->blobSize == 0 || txtr->blobSize > 32u * 1024u * 1024u) {
-            logInfo("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, txtr->blobSize);
-            return false;
-        }
-        // PNG, GameMaker QOI or BZip2+QOI (2022+ titles such as Deltarune chapters 2-5).
-        int w = 0, h = 0;
-        uint8_t* pixels = ImageDecoder_decodeToRgba(txtr->blobData, txtr->blobSize,
-            DataWin_isVersionAtLeast(dr->base.dataWin, 2022, 5, 0, 0), &w, &h);
-        if (!pixels) {
-            logWarn("BS: could not decode TXTR page %u\n", i);
-            return false;
-        }
-        if (w <= 0 || h <= 0 || w > 8192 || h > 8192) {
-            logInfo("BS: invalid TXTR dimensions for page %u (%d x %d)\n", i, w, h);
-            free(pixels);
-            return false;
-        }
-
-        dr->textureWidths[i] = w;
-        dr->textureHeights[i] = h;
-
-        // DXT is lossy and slow to encode, so by default pages stay full quality
-        // while they fit in 3/4 of the budget; only frames that need more (e.g.
-        // Deltarune Ch5 battles) get compressed pages. "compressTextures": true
-        // compresses everything.
-        bool compress = w % 4 == 0 && h % 4 == 0 &&
-            (dr->compressTextures ||
-             !d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h * 4u, dr->maxTextureBytes / 4 * 3));
-        if (compress) {
-            uint32_t bytes = 0;
-            IDirect3DTexture9* compressed = d3d9CreateDxtTexture(dr, i, pixels, w, h, &bytes);
-            free(pixels);
-            if (compressed) {
-                dr->textures[i] = compressed;
-                dr->textureBytesAllocated += bytes;
-                dr->pageBytes[i] = bytes;
-            }
-            if (dr->base.dataWin->lazyLoadTextures) {
-                free(txtr->blobData);
-                txtr->blobData = NULL;
-            }
-            return compressed != NULL;
-        }
-
-        // Xbox 360 textures are uploaded through a linear surface. Keep a
-        // strict aggregate budget so malformed WADs cannot exhaust unified RAM.
-        if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h * 4u, dr->maxTextureBytes)) {
-            logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
-                    i, dr->textureBytesAllocated >> 20);
-            free(pixels);
-            return false;
-        }
-        IDirect3DTexture9* linearTex = NULL;
-        HRESULT textureHr = dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8,
-                                               D3DPOOL_DEFAULT, &linearTex, NULL);
-        if (SUCCEEDED(textureHr) && linearTex) {
-            D3DLOCKED_RECT lr;
-            textureHr = linearTex->LockRect(0, &lr, NULL, 0);
-            if (SUCCEEDED(textureHr) && lr.pBits) {
-                uint64_t allocationBytes = lr.Pitch > 0 ? (uint64_t)lr.Pitch * (uint64_t)h : 0;
-                if (lr.Pitch < w * 4 || allocationBytes == 0 ||
-                    allocationBytes > dr->maxTextureBytes ||
-                    dr->textureBytesAllocated > dr->maxTextureBytes - (uint32_t)allocationBytes) {
-                    textureHr = E_OUTOFMEMORY;
-                    HRESULT unlockHr = linearTex->UnlockRect(0);
-                    if (FAILED(unlockHr)) textureHr = unlockHr;
-                } else {
-                    for (int y2 = 0; y2 < h; y2++) {
-                        uint8_t* src = pixels + (size_t)y2 * (size_t)w * 4u;
-                        DWORD* dst = (DWORD*)((uint8_t*)lr.pBits + (size_t)y2 * (size_t)lr.Pitch);
-                        for (int x2 = 0; x2 < w; x2++) {
-                            uint8_t r = src[x2 * 4 + 0];
-                            uint8_t g = src[x2 * 4 + 1];
-                            uint8_t b = src[x2 * 4 + 2];
-                            uint8_t a = src[x2 * 4 + 3];
-                            if (a == 0) { r = 0; g = 0; b = 0; }
-                            dst[x2] = D3DCOLOR_ARGB(a, r, g, b);
-                        }
-                    }
-                    textureHr = linearTex->UnlockRect(0);
-                    if (SUCCEEDED(textureHr)) {
-                        dr->textures[i] = linearTex;
-                        dr->textureBytesAllocated += (uint32_t)allocationBytes;
-                        dr->pageBytes[i] = (uint32_t)allocationBytes;
-                        linearTex = NULL;
-                    }
-                }
-            } else if (SUCCEEDED(textureHr)) {
-                HRESULT unlockHr = linearTex->UnlockRect(0);
-                if (FAILED(unlockHr)) textureHr = unlockHr;
-            }
-        } else if (SUCCEEDED(textureHr)) {
-            textureHr = E_FAIL;
-        }
-
-        if (linearTex) linearTex->Release();
-        if (!dr->textures[i]) {
-            logInfo("BS: D3D9 texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)textureHr);
-        }
-        free(pixels);
-    // Lazy mode: drop the compressed blob once uploaded; an evicted page re-reads it from disk.
-    if (dr->base.dataWin->lazyLoadTextures) {
-        free(txtr->blobData);
-        txtr->blobData = NULL;
+// GPU half (main thread): copies a decoded page into a new texture.
+static bool d3d9UploadPage(D3D9Renderer* dr, uint32_t i, uint8_t* data, int w, int h) {
+    bool dxt = w < 0;
+    if (dxt) w = -w;
+    uint32_t bytes = dxt ? (uint32_t)w * (uint32_t)h : (uint32_t)w * (uint32_t)h * 4u;
+    if (!d3d9MakeRoom(dr, bytes, dr->maxTextureBytes)) {
+        logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
+                i, dr->textureBytesAllocated >> 20);
+        return false;
     }
-    return dr->textures[i] != NULL;
+    IDirect3DTexture9* tex = NULL;
+    D3DLOCKED_RECT lr;
+    HRESULT hr = Dev(dr)->CreateTexture(w, h, 1, 0, dxt ? D3DFMT_LIN_DXT5 : D3DFMT_LIN_A8R8G8B8,
+                                        D3DPOOL_DEFAULT, &tex, NULL);
+    if (SUCCEEDED(hr) && tex) hr = tex->LockRect(0, &lr, NULL, 0);
+    if (FAILED(hr) || !tex) {
+        logWarn("D3D9: texture upload failed for page %u (hr=0x%08X)\n", i, (unsigned)hr);
+        if (tex) tex->Release();
+        return false;
+    }
+    uint32_t rows = dxt ? (uint32_t)h / 4u : (uint32_t)h, rowBytes = (uint32_t)w * 4u;
+    for (uint32_t y = 0; y < rows; y++)
+        memcpy((uint8_t*)lr.pBits + (size_t)y * lr.Pitch, data + (size_t)y * rowBytes, rowBytes);
+    tex->UnlockRect(0);
+    dr->textures[i] = tex;
+    dr->textureWidths[i] = w;
+    dr->textureHeights[i] = h;
+    dr->pageBytes[i] = (uint32_t)lr.Pitch * rows;
+    dr->textureBytesAllocated += dr->pageBytes[i];
+    return true;
+}
+
+// DXT is lossy, so pages stay full quality while they fit in 3/4 of the budget;
+// only frames that need more (e.g. Deltarune Ch5 battles) get compressed pages.
+// "compressTextures": true compresses everything.
+static bool d3d9WantDxt(D3D9Renderer* dr, Texture* t) {
+    if (dr->compressTextures) return true;
+    if (t->textureWidth <= 0 || t->textureHeight <= 0) return false; // size unknown before decode
+    return !d3d9MakeRoom(dr, (uint32_t)t->textureWidth * (uint32_t)t->textureHeight * 4u,
+                         dr->maxTextureBytes / 4 * 3);
+}
+
+static void d3d9DropBlob(D3D9Renderer* dr, uint32_t i) {
+    // Lazy mode: drop the compressed blob once uploaded; an evicted page re-reads it from disk.
+    Texture* t = &dr->base.dataWin->txtr.textures[i];
+    if (dr->base.dataWin->lazyLoadTextures) { free(t->blobData); t->blobData = NULL; }
+}
+
+static bool d3d9ReadBlob(D3D9Renderer* dr, uint32_t i) {
+    Texture* t = &dr->base.dataWin->txtr.textures[i];
+    DataWin_loadTxtrIfNeeded(dr->base.dataWin, i);
+    if (t->blobData && t->blobSize > 0 && t->blobSize <= 32u * 1024u * 1024u) return true;
+    logInfo("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, t->blobSize);
+    return false;
+}
+
+// Synchronous load, used when no worker threads could be started.
+static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
+    if (!d3d9ReadBlob(dr, i)) return false;
+    Texture* t = &dr->base.dataWin->txtr.textures[i];
+    int w = 0, h = 0;
+    uint8_t* data = d3d9DecodePage(t->blobData, t->blobSize,
+        DataWin_isVersionAtLeast(dr->base.dataWin, 2022, 5, 0, 0), d3d9WantDxt(dr, t), &w, &h);
+    bool ok = data && d3d9UploadPage(dr, i, data, w, h);
+    if (!data) logWarn("BS: could not decode TXTR page %u\n", i);
+    free(data);
+    d3d9DropBlob(dr, i);
+    return ok;
+}
+
+static DWORD WINAPI d3d9LoaderThread(LPVOID arg) {
+    D3D9Loader* L = (D3D9Loader*)arg;
+    for (;;) {
+        WaitForSingleObject(L->wake, INFINITE);
+        if (L->quit) return 0;
+        EnterCriticalSection(&L->lock);
+        uint32_t page = L->queue[L->head];
+        L->head = (L->head + 1) % L->cap;
+        Texture* t = &L->dw->txtr.textures[page]; // blob stays put until the page is READY
+        const uint8_t* blob = t->blobData;
+        uint32_t size = t->blobSize;
+        bool dxt = L->dxt[page] != 0;
+        LeaveCriticalSection(&L->lock);
+        int w = 0, h = 0;
+        uint8_t* data = d3d9DecodePage(blob, size, L->qoiTitle, dxt, &w, &h);
+        EnterCriticalSection(&L->lock);
+        L->out[page] = data;
+        L->outW[page] = w;
+        L->outH[page] = h;
+        L->state[page] = data ? D3D9_PAGE_READY : D3D9_PAGE_BAD;
+        LeaveCriticalSection(&L->lock);
+    }
+}
+
+static void d3d9LoaderStart(D3D9Renderer* dr, DataWin* dw) {
+    uint32_t n = dw->txtr.count;
+    if (n == 0) return;
+    D3D9Loader* L = (D3D9Loader*)calloc(1, sizeof(D3D9Loader));
+    if (!L) return;
+    L->dw = dw;
+    L->qoiTitle = DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0);
+    L->cap = n;
+    L->queue = (uint32_t*)calloc(n, sizeof(uint32_t));
+    L->state = (uint8_t*)calloc(n, 1);
+    L->dxt = (uint8_t*)calloc(n, 1);
+    L->out = (uint8_t**)calloc(n, sizeof(uint8_t*));
+    L->outW = (int32_t*)calloc(n, sizeof(int32_t));
+    L->outH = (int32_t*)calloc(n, sizeof(int32_t));
+    L->wake = CreateSemaphore(NULL, 0, (LONG)n + D3D9_LOADER_THREADS, NULL);
+    if (!L->queue || !L->state || !L->dxt || !L->out || !L->outW || !L->outH || !L->wake) {
+        logWarn("%s", "D3D9: texture loader unavailable, decoding on the main thread\n");
+        if (L->wake) CloseHandle(L->wake);
+        free(L->queue); free(L->state); free(L->dxt); free(L->out); free(L->outW); free(L->outH); free(L);
+        return;
+    }
+    InitializeCriticalSection(&L->lock);
+    for (int k = 0; k < D3D9_LOADER_THREADS; k++) {
+        // 256 KB stack: the BZip2 decoder keeps sizeable locals
+        L->threads[k] = CreateThread(NULL, 256 * 1024, d3d9LoaderThread, L, CREATE_SUSPENDED, NULL);
+        if (L->threads[k]) {
+            XSetThreadProcessor(L->threads[k], 2 + k);
+            ResumeThread(L->threads[k]);
+        }
+    }
+    dr->loader = L;
+}
+
+static void d3d9LoaderStop(D3D9Renderer* dr) {
+    D3D9Loader* L = (D3D9Loader*)dr->loader;
+    if (!L) return;
+    L->quit = true;
+    ReleaseSemaphore(L->wake, D3D9_LOADER_THREADS, NULL);
+    for (int k = 0; k < D3D9_LOADER_THREADS; k++) {
+        if (!L->threads[k]) continue;
+        WaitForSingleObject(L->threads[k], INFINITE);
+        CloseHandle(L->threads[k]);
+    }
+    for (uint32_t i = 0; i < L->cap; i++) free(L->out[i]);
+    CloseHandle(L->wake);
+    DeleteCriticalSection(&L->lock);
+    free(L->queue); free(L->state); free(L->dxt); free(L->out); free(L->outW); free(L->outH); free(L);
+    dr->loader = NULL;
+}
+
+// Queues the page if needed and uploads it once decoded. With `wait`, blocks
+// until it is ready (texture size queries and primitives cannot skip a frame).
+static void d3d9LoaderRequest(D3D9Renderer* dr, uint32_t i, bool wait) {
+    D3D9Loader* L = (D3D9Loader*)dr->loader;
+    EnterCriticalSection(&L->lock);
+    uint8_t st = L->state[i];
+    LeaveCriticalSection(&L->lock);
+    if (st == D3D9_PAGE_IDLE) {
+        if (!d3d9ReadBlob(dr, i)) { dr->pageFailed[i] = 1; return; }
+        bool dxt = d3d9WantDxt(dr, &dr->base.dataWin->txtr.textures[i]);
+        EnterCriticalSection(&L->lock);
+        L->dxt[i] = dxt;
+        L->state[i] = st = D3D9_PAGE_QUEUED;
+        L->queue[L->tail] = i;
+        L->tail = (L->tail + 1) % L->cap;
+        LeaveCriticalSection(&L->lock);
+        ReleaseSemaphore(L->wake, 1, NULL);
+    }
+    while (st == D3D9_PAGE_QUEUED) {
+        if (!wait) return;
+        Sleep(1);
+        EnterCriticalSection(&L->lock);
+        st = L->state[i];
+        LeaveCriticalSection(&L->lock);
+    }
+    // READY or BAD: the workers are done with this page
+    uint8_t* data = L->out[i];
+    int w = L->outW[i], h = L->outH[i];
+    L->out[i] = NULL;
+    EnterCriticalSection(&L->lock);
+    L->state[i] = D3D9_PAGE_IDLE;
+    LeaveCriticalSection(&L->lock);
+    if (!data || !d3d9UploadPage(dr, i, data, w, h)) {
+        if (!data) logWarn("BS: could not decode TXTR page %u\n", i);
+        dr->pageFailed[i] = 1;
+    }
+    free(data);
+    d3d9DropBlob(dr, i);
 }
 
 // Every page lookup goes through here: loads on first use and marks it used this frame.
+// Returns NULL while the page is still decoding unless `wait` is set.
 // shortcut: a page that fails once (even for lack of room) stays missing until restart.
-static void* d3d9Page(D3D9Renderer* dr, int32_t page) {
+static void* d3d9PageEx(D3D9Renderer* dr, int32_t page, bool wait) {
     if (page < 0 || !dr->textures || (uint32_t)page >= dr->textureCount) return NULL;
-    if (!dr->textures[page] && !dr->pageFailed[page] && !d3d9LoadPage(dr, (uint32_t)page))
-        dr->pageFailed[page] = 1;
     dr->pageLastUse[page] = dr->frameCounter;
+    if (dr->textures[page] || dr->pageFailed[page] ||
+        (uint32_t)page >= dr->originalTexturePageCount) return dr->textures[page];
+    if (dr->loader) d3d9LoaderRequest(dr, (uint32_t)page, wait);
+    else if (!d3d9LoadPage(dr, (uint32_t)page)) dr->pageFailed[page] = 1;
     return dr->textures[page];
+}
+
+static void* d3d9Page(D3D9Renderer* dr, int32_t page) {
+    return d3d9PageEx(dr, page, false);
 }
 
 static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
@@ -583,6 +691,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
     dr->originalTexturePageCount = dataWin->txtr.count;
     dr->originalTpagCount = dataWin->tpag.count;
     dr->originalSpriteCount = dataWin->sprt.count;
+    d3d9LoaderStart(dr, dataWin);
 
     dr->currentTextureIndex = -1;
     dr->quadCount = 0;
@@ -594,6 +703,7 @@ static void d3d9Init(Renderer* renderer, DataWin* dataWin) {
 static void d3d9Destroy(Renderer* renderer) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     VMBuiltins_resetD3D(renderer); // frees renderer->d3d, as every upstream renderer does
+    d3d9LoaderStop(dr); // workers read the blobs freed below
     if (dr->textures) {
         for (uint32_t i = 0; i < dr->textureCount; i++) {
             if (dr->textures[i]) ((IDirect3DTexture9*)dr->textures[i])->Release();
@@ -1722,7 +1832,9 @@ static void d3d9DrawVertexBuffer(Renderer* renderer, VertexBuffer* vb, int32_t p
             const uint8_t* v = vb->data + (size_t)(offset + i) * vb->vertexSize;
             const float* p = (const float*)(v + f->elements[pos].offset);
             float sx, sy, u = 0.0f, t = 0.0f, r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
-            transformPoint(dr, p[0], f->elements[pos].type == VERTEX_TYPE_FLOAT1 ? 0.0f : p[1], &sx, &sy);
+            VertexType pt = f->elements[pos].type;
+            transformPoint3(dr, p[0], pt == VERTEX_TYPE_FLOAT1 ? 0.0f : p[1],
+                            pt == VERTEX_TYPE_FLOAT3 || pt == VERTEX_TYPE_FLOAT4 ? p[2] : 0.0f, &sx, &sy);
             if (uv >= 0) {
                 const float* q = (const float*)(v + f->elements[uv].offset);
                 u = q[0]; t = q[1];
@@ -1988,7 +2100,7 @@ static uint32_t d3d9SpriteGetTexture(Renderer* r, int32_t tpagIndex) {
     DataWin* dw = r->dataWin;
     if (!dw || tpagIndex < 0 || (uint32_t)tpagIndex >= dw->tpag.count) return 0;
     int32_t page = dw->tpag.items[tpagIndex].texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page)) return 0;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9PageEx(dr, page, true)) return 0;
     return (uint32_t)tpagIndex + 1;
 }
 static uint32_t d3d9SurfaceGetTexture(Renderer* r, int32_t i) {
@@ -2003,7 +2115,7 @@ static float d3d9TextureGetTexelWidth(Renderer* r, uint32_t texID) {
     if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
     D3D9Renderer* dr = (D3D9Renderer*)r;
     int32_t page = dw->tpag.items[texID - 1].texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page) || dr->textureWidths[page] <= 0) return 0.0f;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9PageEx(dr, page, true) || dr->textureWidths[page] <= 0) return 0.0f;
     return 1.0f / (float)dr->textureWidths[page];
 }
 static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
@@ -2015,7 +2127,7 @@ static float d3d9TextureGetTexelHeight(Renderer* r, uint32_t texID) {
     if (!dw || texID == 0 || texID - 1 >= dw->tpag.count) return 0.0f;
     D3D9Renderer* dr = (D3D9Renderer*)r;
     int32_t page = dw->tpag.items[texID - 1].texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page) || dr->textureHeights[page] <= 0) return 0.0f;
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9PageEx(dr, page, true) || dr->textureHeights[page] <= 0) return 0.0f;
     return 1.0f / (float)dr->textureHeights[page];
 }
 static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
@@ -2032,7 +2144,7 @@ static bool d3d9TextureGetUVs(Renderer* r, uint32_t texID, float* uv) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
     TexturePageItem* t = &dw->tpag.items[texID - 1];
     int32_t page = t->texturePageId;
-    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9Page(dr, page) ||
+    if (page < 0 || (uint32_t)page >= dr->textureCount || !d3d9PageEx(dr, page, true) ||
         dr->textureWidths[page] <= 0 || dr->textureHeights[page] <= 0) return false;
     float w = (float)dr->textureWidths[page], h = (float)dr->textureHeights[page];
     uv[0] = (float)t->sourceX / w;

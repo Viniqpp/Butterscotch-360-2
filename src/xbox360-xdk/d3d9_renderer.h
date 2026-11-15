@@ -50,6 +50,7 @@ typedef struct {
     uint32_t* pageBytes;
     uint8_t* pageFailed;   // decode/upload failed: do not retry every draw
     uint32_t frameCounter;
+    void* loader;          // D3D9Loader: background page decoding
     bool compressTextures; // CONFIG.JSN "compressTextures": DXT5 for every page (default: only under pressure)
 
     // 1x1 white texture for primitives
