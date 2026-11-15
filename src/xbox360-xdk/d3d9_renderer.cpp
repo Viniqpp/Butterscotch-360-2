@@ -620,7 +620,8 @@ static void d3d9PickCacheDir(D3D9Loader* L) {
         }
         // Read-only game folder (Xenia): the title's utility drive. The name keys on the
         // folder path too, so each Deltarune chapter keeps its own pages.
-        if (attempt == 0 && XMountUtilityDrive(FALSE, 16384, 65536) != ERROR_SUCCESS) break;
+        // Xenia (mount_cache = true) already provides cache: and may fail the mount call itself.
+        if (attempt == 0) XMountUtilityDrive(FALSE, 16384, 65536);
         uint32_t hash = 2166136261u;
         for (const char* c = g_d3d9DataWinPath; *c; c++) hash = (hash ^ (uint8_t)*c) * 16777619u;
         sprintf(dir, "cache:\\bs_%08X_%08X\\", (unsigned)hash, (unsigned)size);
