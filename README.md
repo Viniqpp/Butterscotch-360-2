@@ -1,235 +1,125 @@
-<h1 align="center">🥧 Butterscotch 360 — Modern Runtime Rework</h1>
+# Butterscotch 360
 
-<p align="center">
-  An unofficial community rework of the original <a href="https://github.com/ceilingtilefan/Butterscotch-360">Butterscotch 360 port</a>, bringing it forward to the modern <a href="https://github.com/ButterscotchRunner/Butterscotch">Butterscotch</a> runtime.
-</p>
+An unofficial community project bringing the modern [Butterscotch](https://github.com/ButterscotchRunner/Butterscotch) GameMaker runner to the **Xbox 360**.
 
-## Project goal
+The project builds on the original [Butterscotch 360 port](https://github.com/ceilingtilefan/Butterscotch-360), updating its runtime integration and Xbox-specific platform code to work with the modern runner.
 
-The goal of this project is to bring a modern version of the Butterscotch GameMaker runner to the **Xbox 360**, with the long-term goal of running:
+> **Status: Experimental.** The runner has been built with the Xbox 360 XDK and launched on an RGH Xbox 360. Undertale has reached gameplay in an initial test, while Deltarune Chapter 1 currently reaches the game loop but displays a black screen and produces no audible output. Compatibility is still being developed and tested.
 
-- **Undertale** — aiming for full compatibility.
-- **Deltarune** — aiming to support every chapter, where technically possible.
+## What is this?
 
-This project ports the **runner**, not the games themselves. It aims to run the games through their original GameMaker data files rather than recreating or remaking them.
+Butterscotch is a reimplementation of the GameMaker: Studio runner. It executes the game's original data and bytecode; it is not a remake or a collection of game-specific ports.
 
-These are compatibility goals, not claims that the games currently work. Full compatibility—especially across every Deltarune chapter—may depend on runtime features, game formats and Xbox 360 hardware limitations that still need to be investigated.
+The goal of Butterscotch 360 is to bring that runner to Xbox 360 hardware.
 
-## About this rework
+Current compatibility targets:
+- **Undertale** — the primary compatibility target.
+- **Deltarune** — investigate support for its chapters where the runtime and Xbox 360 hardware make it technically possible.
+- **Other compatible GameMaker games** — possible in principle, but compatibility depends on the game's runtime version, features and data format.
 
-This project continues the work of the original community Xbox 360 port by updating its platform code to work with the modern Butterscotch codebase. The intention is to preserve the original port's Xbox-specific work while bringing its runtime, renderer, audio, filesystem and build setup forward.
+These are project goals, not promises of compatibility. A game starting successfully does not mean that it is fully playable.
 
-The main development work happens on the
-[`refresh2/modern-upstream-migration` branch](https://github.com/Viniqpp/Butterscotch-360-2/tree/refresh2/modern-upstream-migration).
-The original `main` branch is being kept separate while the rework is developed.
+## Current status
 
-**Status: experimental; now running on Xbox 360 hardware.** The modern runtime migration, XDK platform adapters and D3D9 renderer integration are implemented far enough to build and launch the runner on an RGH Xbox 360. Undertale has launched in an initial hardware test, but has not yet received a full compatibility/regression pass. Deltarune Chapter 1 currently reaches the game loop but displays a black screen and produces no audible output. Neither title should be considered fully supported yet.
+The modern runtime has been integrated with Xbox 360 platform adapters:
 
-The XDK Smoke and Release configurations have previously compiled with the Xbox 360 XDK 21256.3 toolchain. That successful build predates some later branch changes, so the current branch head still needs a fresh XDK rebuild. Hardware testing is separate from compile verification. See the [migration notes](docs/XBOX360_REFRESH2_MIGRATION.md) and [XDK build/deploy guide](docs/XDK_21256_BUILD_AND_DEPLOY.md) for details.
+| Area | Current state |
+| --- | --- |
+| Modern runner and VM | Integrated |
+| Xbox 360 D3D9 renderer | Functional baseline; several advanced features remain unsupported |
+| XAudio2 audio backend | Modern audio interface connected; feature and playback testing ongoing |
+| Xbox 360 filesystem | Modern filesystem interface implemented |
+| Controller input and main loop | Integrated |
+| XDK build | Built locally with XDK 21256.3 during development |
+| Console compatibility | Early testing; pre-release |
 
-## Refresh2 progress and legacy issue retests
+### Known limitations
 
-Refresh2 is more than a build-system update: it replaces the old runner core with modern upstream code and adapts the Xbox 360 renderer, audio system, filesystem and main loop to the newer interfaces.
+- Deltarune Chapter 5's Flowery battle: the background tower and the song lyrics do not appear yet (the game routes them through a shader extension the runner does not implement).
+- Texture pages load in the background, so sprites can pop in a moment late the first time they are drawn. A lossless texture cache exists but does not activate under Xenia yet.
+- Depth testing (`gpu_set_ztestenable`), perspective-correct texturing and `surface_get_pixels` are not implemented. Sprites created from surfaces cannot be deleted.
+- When texture memory runs short, pages are DXT5-compressed, which can shift colours slightly.
 
-| Original Xbox 360 port issue | Refresh2 work relevant to it | Current assessment |
-| --- | --- | --- |
-| Audio could play at the wrong speed | Reworked XAudio2 integration, modern pitch handling, audio groups and external audio-stream support | **Not confirmed fixed.** The implementation is substantially different; compare the same tracks on hardware. |
-| 4:3 output was not properly optimized | Dynamic output dimensions, viewport scaling, camera/view-projection transforms and separate GUI projection handling | **Not confirmed fixed.** Test with an actual 4:3 output mode. |
-| Performance slowdowns | Modern frame lifecycle, accumulated simulation steps with rendering after catch-up, and per-frame step/draw/present timing logs | **Potential improvement.** Hardware profiling in demanding areas is still required. |
-| Undyne's spear aiming was incorrect | Camera and view-angle transforms are now applied by the renderer | **Unverified.** The sprite-rotation path itself also needs to be checked in the Undyne fight. |
-| Original Deltarune `SURVEY_PROGRAM` did not boot | Modern WAD/parser and VM migration plus updated platform adapters | **Not fixed or proven by the migration alone.** A Chapter 1 hardware test currently reaches the main loop but renders a black screen; no sound was heard. |
+### Game testing
 
-### Current implementation coverage
+Tested mainly in Xenia Canary, with earlier runs on an RGH console:
 
-- **Renderer:** implements 72 of the modern 81 renderer-vtable entries. Nine optional callbacks remain unset. User-created surfaces, custom shaders/uniforms and several advanced drawing features are still unsupported or incomplete.
-- **Audio:** implements all 31 modern audio-vtable entries. This does not mean every audio feature is complete: unsupported operations may return safe failure/no-op results, and playback still needs game-by-game verification.
-- **Filesystem:** implements all 20 modern filesystem-vtable entries, including binary access, streaming handles and directory operations.
-- **Runtime and input:** uses the modern runner lifecycle and publishes native Xbox controller state to the modern gamepad API.
-- **Diagnostics:** writes `game:\butterscotch.log` and periodically reports simulation, rendering and presentation timings.
+- **Undertale:** boots and plays through the intro.
+- **Deltarune launcher:** chapter select works, including switching chapters (Xenia asks to restart on a chapter switch).
+- **Deltarune Chapter 3:** reaches file select. **Chapter 5:** plays into the Flowery battle, apart from the issues above.
+- Chapters 1, 2 and 4 have not been retested with this build.
 
-### Hardware test notes
+These are spot checks, not full playthroughs.
 
-The initial Undertale test on the current development build appeared to run well, but only a limited portion of the game has been exercised. Treat this as an encouraging smoke test, not a compatibility certification.
+## Building
 
-The current Deltarune Chapter 1 test successfully parsed `data.win`, initialized the VM, renderer and audio system, loaded the initial room, changed rooms and continued entering the main loop. The captured log also reports a missing external file, `game:\mus\AUDIO_DRONE.ogg`. This is a confirmed missing asset for that test setup, but it does not by itself explain the black screen or prove that it is the only missing audio file. The renderer's known surface and shader gaps are plausible causes of missing visuals and require targeted tracing.
+The Xbox 360 target requires a compatible Windows development environment:
+- Visual Studio 2010 with Service Pack 1
+- Xbox 360 XDK 21256.3
+- The XDK's Xbox 360 compiler, libraries and MSBuild integration
 
-The original port's known issues are therefore **regression targets**, not bugs that should be marked fixed based only on source changes. Compatibility claims should be updated only after the relevant game section or feature has been tested on the console.
+The XDK is proprietary software and is **not included in this repository**. Install it separately and make sure the `XEDK` environment variable points to the installation.
 
-## AI-assisted development
+Check the environment:
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\xdk\build-xdk.ps1 -CheckOnly
+```
 
-This rework is being developed by **Vinny with assistance from ChatGPT and Claude**. They are used for tasks such as source-code analysis, migration planning, implementation drafts, debugging and documentation.
+Build the Release XEX:
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\xdk\build-xdk.ps1 -Configuration Release -Package
+```
 
-AI-generated suggestions and code are not assumed to be correct just because a tool produced them. They can contain mistakes, misunderstand the project or suggest changes that do not compile. Their output is treated as assistance, and the project is being checked and revised incrementally. Features are not considered tested until they have actually been built and verified.
+The packaged output is placed under `dist\butterscotch\`. To stage a game's data alongside the executable, pass its `data.win` path:
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\xdk\build-xdk.ps1 -Configuration Release -Package -DataWin "C:\path\to\game\data.win"
+```
 
-ChatGPT and Claude are development tools used on this project; their creators do not necessarily endorse or maintain this rework.
+For the complete setup, troubleshooting, smoke-test and deployment instructions, see [Building with XDK 21256.3](docs/XDK_21256_BUILD_AND_DEPLOY.md).
+
+## Running on an RGH Xbox 360
+
+The project is currently tested on an RGH console using Aurora. The packaged runner and the game's required data files must be placed together in the same game directory. Transfer the files over FTP or another method supported by your setup, then launch the XEX through Aurora.
+
+Keep the game's own data files with the executable. Depending on the game, this can include `data.win`, audio-group files, external audio assets and configuration files. Missing external assets may cause individual game features to fail.
+
+The runner writes diagnostics to:
+```
+game:\butterscotch.log
+```
+
+When reporting a problem, include the game/version, console or emulator, build/commit used, what happened, and the relevant log.
+
+## Testing and contributing
+
+Testing reports are especially useful at this stage. If you try a build, please report:
+1. The game and exact version tested.
+2. Whether it boots, reaches a menu, enters gameplay and can transition between rooms.
+3. Whether graphics, audio and controller input work.
+4. Any crashes, freezes, missing assets or visual/audio problems.
+5. The build or commit identifier and the complete runner log, if available.
+
+Please distinguish between a game that launches, one that reaches gameplay and one that has been tested thoroughly. Emulator results are useful, but should be identified separately from results on real Xbox 360 hardware.
+
+Bug reports and focused contributions are welcome. The project is experimental, so regressions and incomplete features are expected.
+
+## Development approach
+
+This is a human-directed, AI-assisted engineering project. ChatGPT and Claude have assisted with research, code review, implementation, debugging and documentation. Their output is reviewed and tested rather than treated as automatically correct. Build success, runtime behavior and compatibility are tracked as separate things.
 
 ## A personal note from Vinny
 
 **TO BE WRITTEN**
 
-## Credits and project origins
+## Credits and acknowledgements
 
-This rework builds on the work of:
+- [Butterscotch](https://github.com/ButterscotchRunner/Butterscotch) — the upstream open-source GameMaker runner.
+- [Butterscotch 360](https://github.com/ceilingtilefan/Butterscotch-360) — the original community Xbox 360 port and the starting point for this work.
 
-- [Butterscotch](https://github.com/ButterscotchRunner/Butterscotch) — the original open-source GameMaker runner.
-- [Butterscotch 360](https://github.com/ceilingtilefan/Butterscotch-360) by [@ceilingtilefan](https://github.com/ceilingtilefan) — the original community Xbox 360 port.
-
-This repository is an unofficial community project. It is not affiliated with or endorsed by Toby Fox, the creators or publishers of Undertale or Deltarune, GameMaker/YoYo Games, Microsoft, or the upstream Butterscotch maintainers.
-
-The upstream project overview is retained below for background and attribution.
+This is an unofficial community project and is not affiliated with or endorsed by Toby Fox, the creators or publishers of Undertale or Deltarune, YoYo Games/GameMaker, Microsoft, or the upstream Butterscotch maintainers.
 
 ---
 
-<!-- Badges, about the GitHub repository itself -->
-<p align="center">
-<a href="https://discord.gg/2gQR7t3WJR"><img src="https://img.shields.io/discord/1406856655920168971?color=5865F2&logo=discord&logoColor=white&label=discord"></a>
-</p>
+## Upstream Butterscotch overview
 
-> [!IMPORTANT]  
-> Butterscotch is still VERY early in development and it is NOT that good yet.
-
-When you create a game in GameMaker: Studio and export it, GameMaker: Studio exports the game code as bytecode instead of native compiled code, and that bytecode is compatible with any other GameMaker: Studio runner (also known as YoYo runner), as long as they have matching GameMaker: Studio versions. This is similar to how Java applications work.
-
-This is how projects such as [Droidtale](https://mrpowergamerbr.com/projects/droidtale) (which was also made by yours truly) can exist. We exploit that GameMaker: Studio games compile to bytecode, which means they can be ran on *any* platform that has an official runner for it!
-
-Ever since I created Droidtale 10+ years ago, I had that lingering thought in my mind... If GameMaker games use bytecode, what prevents us from creating our *own* runner? And if we can write our *own* runner, what prevents us from porting GameMaker: Studio games to other platforms?
-
-And that's where Butterscotch comes in! Butterscotch is an open source re-implementation of GameMaker: Studio's runner.
-
-**Butterscotch PlayStation 2 ISO Generator:** https://butterscotch.mrpowergamerbr.com/
-
-## Game Compatibility
-
-Butterscotch's goal is to be able to have Undertale v1.08 (GameMaker: Studio 1.4.1804, Bytecode Version 16) fully playable. But we do want to support more GameMaker: Studio games in the future too!
-
-While our target is Undertale v1.08, that doesn't mean that other games CAN'T run in Butterscotch! Because Butterscotch is a runner and not a Undertale port/remake, you CAN run other GameMaker: Studio games with it and, as long as the game is compiled with GameMaker: Studio 1.4.1804 and they only use GML variables and functions that Butterscotch supports, it should work fine.
-
-Of course, there are exceptions that break game compatibility altogether:
-
-* Games compiled with YYC, because they use native code instead of bytecode. 
-* Games compiled with the new [GMRT](https://github.com/YoYoGames/GMRT-Beta/tree/main), because they use native code instead of bytecode.
-
-## Supported Platforms
-
-* Linux (GLFW, OpenGL)
-* Windows (GLFW, OpenGL, MinGW)
-* PlayStation 2 (ps2sdk, gsKit)
-* ...and maybe more in the future!
-
-## Building Butterscotch
-
-```bash
-mkdir build && cd build
-cmake -DPLATFORM=glfw -DCMAKE_BUILD_TYPE=Debug ..
-make
-```
-
-If you are using CLion, set the platform in `Settings` > `Build, Execution, Deployment` > `CMake` and add `-DPLATFORM=glfw`
-
-Then run Butterscotch with `./butterscotch /path/to/data.win`!
-
-## CLI parameters
-
-The GLFW target has a lot of nifty CLI parameters that you can use to trace and debug games running on it.
-
-* `--debug`: Enables debugging hotkeys
-* `--screenshot=file_%d.png`: Screenshots the runner, requires `--screenshot-at-frame`.
-* `--screenshot-at-frame=Frame`: Screenshots the runner at a specific frame. Can be used multiple times.
-* `--headless`: Runs the runner in headless mode. When running in headless mode, the game will run at the max speed that your system can handle.
-* `--print-rooms`: Prints all the rooms in the `data.win` file and exits.
-* `--print-declared-functions`: Prints all the declared functions (scripts, object events, etc) in the `data.win` file and exists.
-* `--trace-variable-reads`: Traces variable reads
-* `--trace-variable-writes`: Traces variable writes
-* `--trace-function-calls`: Traces function calls
-* `--trace-alarms`: Traces alarms
-* `--trace-instance-lifecycles`: Traces instance creations and deletions
-* `--trace-events`: Traces events
-* `--trace-event-inherited`: Traces event inherited calls
-* `--trace-tiles`: Traces drawn tiles
-* `--trace-opcodes`: Traces opcodes
-* `--trace-stack`: Traces stack
-* `--trace-frames`: Logs when a frame starts and when a frame ends, including how much time it took to process each frame.
-* `--exit-at-frame=Frame`: Automatically exit the runner after X frames.
-* `--speed`: Speed multiplier
-* `--seed=Seed`: Sets a fixed seed for the runner, useful for reproduceable runs.
-* `--print-rooms`: Prints all rooms to the console, along with all objects present in the room.
-* `--print-declared-functions`: Prints all declared GML scripts by the game
-* `--disassemble`: Dissassembles a specific script
-* `--record-inputs`: Records user inputs
-* `--playback-inputs`: Playbacks user inputs
-* `--debug`: Enable debug features
-
-## Debug Features
-
-When running Butterscotch with `--debug`, the following hotkeys are enabled:
-
-* `Page Up`: Moves forward one room
-* `Page Down`: Moves backwards one room
-* `P`: Pauses the game
-* `O`: While paused, advances the game loop by one frame
-* `F12`: Dumps the current runner state to the console
-* `F11`: Dumps the current runner state to the console (JSON format), or dumps it to a file if `--dump-frame-json-file` is set.
-* `F10`: Sets the `global.interact` flag to `0`. Useful in Undertale when you are moving through rooms and one of them starts a cutscene that doesn't let you move.
-
-## Performance
-
-Performance is pretty good on any modern computer, but when running on low end targets (like the PS2) it is *very* slow when there's a lot of instances on screen, or when a instance does a for loop.
-
-## Then why not have a transpiler?
-
-The issue with a transpiler is that, if you try transpiling the game in the "naive" way, that is, emitting VM calls like it was the original bytecode, you won't get any 
-*improvement* from it, you would need to create a *good* transpiler that actually transpiles it into *good* code, and that's way harder.
-
-Having a transpiler also have other disadvantages:
-
-1. You lose the ability of debugging the runner at a "high level" by tracing opcodes.
-2. Compilation is SLOW, transpiling Undertale in a naive way to C and building it takes 90 seconds on a modern computer, and building it to other targets is so slow that I wasn't even able to test it.
-
-## Screenshots
-
-### Undertale (GLFW)
-
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/6651cc2e-0d6d-4354-b98d-081e84a981df" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/1d6edc51-2829-4f8f-b900-393f21a6655b" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/0d41f16c-7ee5-47de-a2e8-5831cdcd2745" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/45dc47fb-6d8a-44d4-8cbb-2e5791100144" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/7db1c869-e625-4558-9119-0f23da0f020c" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/71fc7616-d580-48fe-aa6d-1e6ceea41bdb" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/4098936e-a1b9-4971-901d-702ec390afa7" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/dd3dcce3-3d78-452f-9af0-27133497650c" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/2e356d04-5aaf-47d4-9bc3-4abba78cd18d" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/a9cbc57f-e9c1-4985-a6af-a98e5fce5ff3" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/e5c67781-0ffc-43c8-9c7d-333254eed704" />
-<img width="160" height="120" alt="Image" src="https://github.com/user-attachments/assets/93900e3c-79b5-4a05-bd6c-d68814e9e101" />
-
-### Undertale (PlayStation 2)
-
-Here's a video :3 https://youtu.be/3MoAPO8H85U
-
-## Tales of Agentic Engineering
-
-Since I created Droidtale, I've always had the thought about "if it is a VM, then you could reimplement it and port any GameMaker game to any platform, right?".
-
-Fast forward ten years, and while I was toying around with Claude Code I've thought about "what if I asked Claude to vibe code a GameMaker runner re-implementation in Kotlin lol". Of course, this did not go well because Claude was not even able to render the Undertale intro sequence, until I intervened and started nudging it in the right direction. After nudging it, and debugging it manually, it actually got somewhere and was able to render Undertale's intro sequence up until the main menu...
-
-...and that's when I found out that we were onto something here and that the idea could be viable. And that's when I started learning C and rewriting the runner to be cross-platform.
-
-Butterscotch is not "vibe coded", that is, I didn't just let Claude go wild and implement everything. This does not work, and anyone that says that "vibe coding" works and will replace all developers is lying, or they aren't skilled enough to know what good code looks like, or they are rich and have a lot of money to spend while Claude keeps getting stuck trying to resolve bugs that they don't know how to fix like [it was a infinite monkey theorem](https://en.wikipedia.org/wiki/Infinite_monkey_theorem).
-
-Butterscotch is made with an "agentic engineering" approach. I did use Claude Code to implement a lot of things in Butterscotch, but every line of code was reviewed and refactored by me to polish the code that Claude made (Claude LOVES creating duplicate code and creating some non-sensical things).
-
-That does not mean that Butterscotch's code is good however, I'm not a C developer (JVM my beloved) and I know just enough C to be dangerous (who doesn't like a use after free crash??) so some of the code decisions are questionable at best, harmful at worst. That's why if you see the codebase, it really feels like it is a Java developer trying to create a C application.
-
-That said, here are some tips and tricks with using Claude Code for projects like this:
-
-* The project itself, when you think about it, is somewhat trivial, which is why Claude excelled on it.
-    * [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) has bytecode documentation and you can decompile Undertale's source code to GML, so Claude can compare the bytecode to the original GML code to figure out what the interpreter is doing wrong.
-    * [GameMaker-HTML5](https://github.com/YoYoGames/GameMaker-HTML5) has GML's builtin variables and functions straight from YoYo Games, so it can just port the functions from JavaScript to C.
-    * While decompiled code is hard for us to understand, LLMs are quite good at it. Telling Claude to read Ghidra's decompiled GameMaker: Studio runner code to figure out some bytecode interpreter opcodes shenanigans actually had surprising results.
-    * This isn't the first project that attempts something like this! [OpenGM](https://github.com/misternebula/OpenGM) is also a open source GameMaker: Studio runner re-implementation, written in C# instead of C, and it exists since 2024! While Claude did *not* read OpenGM's source code during Butterscotch's development, that doesn't mean that Claude never studied OpenGM's source code during its training. So maybe when it was implementing things in Butterscotch, it may have pulled things that it had previously learned from OpenGM and other similar projects.
-* Adding ways for Claude to know what's going on in the runner makes it way easier for it to know what is the issue. Things that are useful for us are also useful for them. That's why Butterscotch has a lot of `--trace-*` functions, because Claude can use it to trace what is going on in the runner to try pointing it to the right direction to where it may be going wrong. And when that fails, we as humans can use the very useful `--trace-*` functions too.
-* Adding ways for Claude to take screenshots lets them try to tackle graphical related issues, because you can tell them "if the old screenshot is different than the new screenshot, you've probably fixed the issue".
-* Adding input recording and playback allows us to record a set of inputs that reproduce a specific bug, and then we can tell Claude to playback our inputs to figure out what could be going wrong to cause that specific bug.
-* You still need to know EXACTLY what you want, and know HOW are you going to break down the problem into small pieces. Just like what you already do when programming. If I didn't already have previous knowledge on how the YoYo runner worked, I would've probably said "pls port Undertale for me kthxbye" and that would've probably gone nowhere.
-
-However I still needed to keep an eye out on whatever Claude was doing if they were trying to fix a non-trivial problem, because if I didn't attempt to nudge it in the right direction, it would go completely off the rails.
+The following overview is retained from the upstream project README for background on the runner and its goals. For the latest upstream information, documentation and supported platforms, visit the [upstream repository](https://github.com/ButterscotchRunner/Butterscotch).
