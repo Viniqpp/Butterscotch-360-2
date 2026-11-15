@@ -676,8 +676,8 @@ VOID __cdecl main() {
     }
 
     // ===[ Cleanup ]===
-    xdkLog("BS: shutting down runner\n");
-    shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
+    // game_change relaunches without teardown: XLaunchNewImage replaces the whole
+    // process, and freeing the runner first crashed on freed memory (0xFEEEFEEE).
     if (g_nextGame[0]) { // relaunch ourselves for the next data.win; does not return on success
         char launchData[520]; // "path\0arguments\0"
         size_t pathSize = strlen(g_nextGame) + 1, argsSize = strlen(g_nextArgs) + 1;
@@ -685,5 +685,8 @@ VOID __cdecl main() {
         memcpy(launchData + pathSize, g_nextArgs, argsSize);
         XSetLaunchData(launchData, (DWORD)(pathSize + argsSize));
         XLaunchNewImage("game:\\default.xex", 0);
+        xdkLog("BS: XLaunchNewImage failed\n");
     }
+    xdkLog("BS: shutting down runner\n");
+    shutdownXdk(runner, vm, renderer, xdkAudio, dataWin, xdkFs, configRoot, pd3dDevice, pD3D);
 }
