@@ -13,19 +13,39 @@
 #endif
 #define XDK_SAVE_DIR "game:\\saves\\"
 
+// Resolves "." and ".." in a backslash path in place, never above the device
+// root ("game:\"), so game paths still cannot escape it. Deltarune chapters
+// stream "../mus/*.ogg" from the shared folder above their own.
+void xdkNormalizeDots(char* path) {
+    char* colon = strchr(path, ':');
+    char* root = colon ? colon + 1 : path;
+    if (*root == '\\') root++;
+    char* out = root;
+    char* in = root;
+    while (*in) {
+        char* seg = in;
+        while (*in && *in != '\\') in++;
+        size_t len = (size_t)(in - seg);
+        bool sep = *in == '\\';
+        if (sep) in++;
+        if (len == 0 || (len == 1 && seg[0] == '.')) continue;
+        if (len == 2 && seg[0] == '.' && seg[1] == '.') {
+            if (out > root) {
+                out--; // step over the separator ending the previous segment
+                while (out > root && out[-1] != '\\') out--;
+            }
+            continue;
+        }
+        memmove(out, seg, len);
+        out += len;
+        if (sep) *out++ = '\\';
+    }
+    *out = '\0';
+}
+
 static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     XdkFileSystem* xfs = (XdkFileSystem*)fs;
     if (!xfs || !relativePath) return NULL;
-
-    // Reject parent-directory components so game paths cannot escape the
-    // selected content root. Check both slash styles before normalizing.
-    const char* component = relativePath;
-    while (*component) {
-        while (*component == '/' || *component == '\\') ++component;
-        const char* start = component;
-        while (*component && *component != '/' && *component != '\\') ++component;
-        if (component - start == 2 && start[0] == '.' && start[1] == '.') return NULL;
-    }
 
     // Only an actual drive-qualified path or a rooted path bypasses data.win's
     // directory. A colon in an ordinary filename is not an absolute-path marker.
@@ -47,11 +67,13 @@ static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     for (char* p = result; *p; ++p) {
         if (*p == '/') *p = '\\';
     }
+    xdkNormalizeDots(result);
     // GameMaker keeps saves in one area per game, shared by every Deltarune
     // chapter and its launcher (%LOCALAPPDATA%\DELTARUNE on PC). Files already in
     // game:\saves\ or not shipped next to data.win (i.e. new saves) live there.
+    // Empty paths and folders (working_directory) stay in the game's folder.
     // shortcut: a write to a file that ships with the game updates the shipped copy.
-    if (!absolute) {
+    if (!absolute && relLen > 0) {
         static const char saveDir[] = XDK_SAVE_DIR;
         char* saved = (char*)malloc(sizeof(saveDir) + relLen);
         if (saved) {
@@ -60,8 +82,10 @@ static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
             for (char* p = saved; *p; ++p) {
                 if (*p == '/') *p = '\\';
             }
-            if (GetFileAttributesA(saved) != INVALID_FILE_ATTRIBUTES ||
-                GetFileAttributesA(result) == INVALID_FILE_ATTRIBUTES) {
+            xdkNormalizeDots(saved);
+            DWORD savedAttr = GetFileAttributesA(saved);
+            bool savedFile = savedAttr != INVALID_FILE_ATTRIBUTES && !(savedAttr & FILE_ATTRIBUTE_DIRECTORY);
+            if (savedFile || GetFileAttributesA(result) == INVALID_FILE_ATTRIBUTES) {
                 free(result);
                 return saved;
             }
