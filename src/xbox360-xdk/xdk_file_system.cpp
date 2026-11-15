@@ -11,6 +11,7 @@
 #ifndef INVALID_FILE_ATTRIBUTES
 #define INVALID_FILE_ATTRIBUTES ((DWORD)-1) // Win32 value; not in the XDK headers
 #endif
+#define XDK_SAVE_DIR "game:\\saves\\"
 
 static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     XdkFileSystem* xfs = (XdkFileSystem*)fs;
@@ -45,6 +46,27 @@ static char* xdkResolvePath(FileSystem* fs, const char* relativePath) {
     // data.win. Mixed slash styles otherwise leak into XDK file operations.
     for (char* p = result; *p; ++p) {
         if (*p == '/') *p = '\\';
+    }
+    // GameMaker keeps saves in one area per game, shared by every Deltarune
+    // chapter and its launcher (%LOCALAPPDATA%\DELTARUNE on PC). Files already in
+    // game:\saves\ or not shipped next to data.win (i.e. new saves) live there.
+    // shortcut: a write to a file that ships with the game updates the shipped copy.
+    if (!absolute) {
+        static const char saveDir[] = XDK_SAVE_DIR;
+        char* saved = (char*)malloc(sizeof(saveDir) + relLen);
+        if (saved) {
+            memcpy(saved, saveDir, sizeof(saveDir) - 1);
+            memcpy(saved + sizeof(saveDir) - 1, relativePath, relLen + 1);
+            for (char* p = saved; *p; ++p) {
+                if (*p == '/') *p = '\\';
+            }
+            if (GetFileAttributesA(saved) != INVALID_FILE_ATTRIBUTES ||
+                GetFileAttributesA(result) == INVALID_FILE_ATTRIBUTES) {
+                free(result);
+                return saved;
+            }
+            free(saved);
+        }
     }
     return result;
 }
@@ -420,5 +442,6 @@ XdkFileSystem* XdkFileSystem_create(const char* dataWinPath) {
     } else {
         strcpy(xfs->basePath, "game:\\");
     }
+    CreateDirectoryA("game:\\saves", NULL); // shared save area; fails harmlessly if it exists or game:\ is read-only
     return xfs;
 }
