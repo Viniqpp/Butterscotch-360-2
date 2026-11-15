@@ -645,9 +645,10 @@ VOID __cdecl main() {
             if (++perfFrames == 60) {
                 MEMORYSTATUS mem;
                 GlobalMemoryStatus(&mem);
-                xdkLog("BS perf: per frame step=%.1fms (%d steps) draw=%.1fms present=%.1fms free=%uMB\n",
+                xdkLog("BS perf: per frame step=%.1fms (%d steps) draw=%.1fms present=%.1fms free=%uMB textures=%uMB\n",
                        perfStepMs / 60.0, perfSteps, perfDrawMs / 60.0, perfPresentMs / 60.0,
-                       (unsigned)(mem.dwAvailPhys / (1024 * 1024)));
+                       (unsigned)(mem.dwAvailPhys / (1024 * 1024)),
+                       ((D3D9Renderer*)renderer)->textureBytesAllocated >> 20);
                 perfStepMs = perfDrawMs = perfPresentMs = 0.0;
                 perfFrames = perfSteps = 0;
             }

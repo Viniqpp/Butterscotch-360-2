@@ -309,7 +309,12 @@ static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
 
         // Xbox 360 textures are uploaded through a linear surface. Keep a
         // strict aggregate budget so malformed WADs cannot exhaust unified RAM.
-        if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h * 4u)) { free(pixels); return false; }
+        if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h * 4u)) {
+            logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
+                    i, dr->textureBytesAllocated >> 20);
+            free(pixels);
+            return false;
+        }
         IDirect3DTexture9* linearTex = NULL;
         HRESULT textureHr = dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_A8R8G8B8,
                                                D3DPOOL_DEFAULT, &linearTex, NULL);
