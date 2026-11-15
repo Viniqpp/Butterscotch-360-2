@@ -110,9 +110,9 @@ if ($Package) {
         # Audio groups, external music and options live next to data.win; games such
         # as Deltarune wait forever in their first room if an audio group is missing.
         $gameDir = Split-Path (Resolve-Path $DataWin)
-        # Sub-folders come along too, so passing Deltarune's launcher data.win stages
+        # Sub-folders (incl. lang*.json) come along too, so passing Deltarune's launcher data.win stages
         # every chapter (chapterN_windows\data.win) for its chapter select.
-        Get-ChildItem $gameDir -Recurse -File | Where-Object { $_.Extension -in '.win', '.dat', '.ogg', '.ini' } | ForEach-Object {
+        Get-ChildItem $gameDir -Recurse -File | Where-Object { $_.Extension -in '.win', '.dat', '.ogg', '.ini', '.json' } | ForEach-Object {
             $rel = $_.FullName.Substring($gameDir.Length + 1)
             New-Item -ItemType Directory -Force (Split-Path "$dist\$rel") | Out-Null
             Copy-Item $_.FullName "$dist\$rel" -Force
