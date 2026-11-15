@@ -2635,15 +2635,15 @@ static void d3d9GpuSetBlendMode(Renderer* r, int32_t mode) {
         case bm_add:
             dst = D3DBLEND_ONE;
             break;
-        case bm_subtract:
-            src = D3DBLEND_SRCALPHA;
-            dst = D3DBLEND_ONE;
-            op = D3DBLENDOP_SUBTRACT;
-            break;
-        case bm_reverse_subtract:
+        case bm_subtract: // GameMaker: destination - source (D3D's REVSUBTRACT)
             src = D3DBLEND_SRCALPHA;
             dst = D3DBLEND_ONE;
             op = D3DBLENDOP_REVSUBTRACT;
+            break;
+        case bm_reverse_subtract: // source - destination
+            src = D3DBLEND_SRCALPHA;
+            dst = D3DBLEND_ONE;
+            op = D3DBLENDOP_SUBTRACT;
             break;
         case bm_max:
             src = D3DBLEND_ONE;
