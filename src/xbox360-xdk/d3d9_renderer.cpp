@@ -423,8 +423,13 @@ static bool d3d9UploadPage(D3D9Renderer* dr, uint32_t i, uint8_t* data, int w, i
 static bool d3d9WantDxt(D3D9Renderer* dr, Texture* t) {
     if (dr->compressTextures) return true;
     if (t->textureWidth <= 0 || t->textureHeight <= 0) return false; // size unknown before decode
-    return !d3d9MakeRoom(dr, (uint32_t)t->textureWidth * (uint32_t)t->textureHeight * 4u,
-                         dr->maxTextureBytes / 4 * 3);
+    // Compress only when the page cannot fit uncompressed beside the pages the
+    // current scene keeps drawing (used this frame or the last one): evicting
+    // those would just reload them next frame.
+    uint32_t pinned = 0;
+    for (uint32_t p = 0; p < dr->originalTexturePageCount; p++)
+        if (dr->textures[p] && dr->pageLastUse[p] + 1 >= dr->frameCounter) pinned += dr->pageBytes[p];
+    return pinned + (uint32_t)t->textureWidth * (uint32_t)t->textureHeight * 4u > dr->maxTextureBytes;
 }
 
 // Synchronous load, used when no worker threads could be started.
@@ -717,19 +722,23 @@ static void d3d9LoaderRequest(D3D9Renderer* dr, uint32_t i, bool wait) {
     L->out[i] = NULL;
     L->state[i] = D3D9_PAGE_IDLE;
     LeaveCriticalSection(&L->lock);
-    if (!data || !d3d9UploadPage(dr, i, data, w, h)) {
-        if (!data) logWarn("BS: could not decode TXTR page %u\n", i);
+    if (!data) {
+        logWarn("BS: could not decode TXTR page %u\n", i);
         dr->pageFailed[i] = 1;
+    } else if (!d3d9UploadPage(dr, i, data, w, h)) {
+        dr->pageFailed[i] = 2; // no room right now: retried shortly (d3d9PageEx)
     }
     free(data);
 }
 
 // Every page lookup goes through here: loads on first use and marks it used this frame.
 // Returns NULL while the page is still decoding unless `wait` is set.
-// shortcut: a page that fails once (even for lack of room) stays missing until restart.
+// shortcut: a page that fails to decode stays missing until restart.
 static void* d3d9PageEx(D3D9Renderer* dr, int32_t page, bool wait) {
     if (page < 0 || !dr->textures || (uint32_t)page >= dr->textureCount) return NULL;
     dr->pageLastUse[page] = dr->frameCounter;
+    // Lacked room earlier: retry twice a second, by then it may get a DXT slot or space.
+    if (dr->pageFailed[page] == 2 && dr->frameCounter % 30 == 0) dr->pageFailed[page] = 0;
     if (dr->textures[page] || dr->pageFailed[page] ||
         (uint32_t)page >= dr->originalTexturePageCount) return dr->textures[page];
     if (dr->loader) d3d9LoaderRequest(dr, (uint32_t)page, wait);
