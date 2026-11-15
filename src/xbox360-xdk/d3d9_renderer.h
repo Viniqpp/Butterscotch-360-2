@@ -106,3 +106,5 @@ extern char g_d3d9ShaderDir[256];
 
 // data.win the loader threads read texture blobs from (and key the cache on).
 extern char g_d3d9DataWinPath[256];
+extern int g_d3d9TraceSurfaces;
+extern char g_d3d9TraceRoom[64];

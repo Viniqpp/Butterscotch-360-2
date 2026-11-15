@@ -357,6 +357,20 @@ static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes, uint32_t limit) {
 #define D3D9_CACHE_MAGIC 0x42534331u // "BSC1"
 
 char g_d3d9DataWinPath[256];
+// CONFIG.JSN "traceSurfaces": N logs the next N surface operations (debugging aid).
+int g_d3d9TraceSurfaces;
+char g_d3d9TraceRoom[64]; // "traceRoom": only trace while this room is current
+static bool d3d9TraceOn(D3D9Renderer* dr) {
+    if (g_d3d9TraceSurfaces <= 0) return false;
+    if (g_d3d9TraceRoom[0]) {
+        Runner* runner = dr->base.runner;
+        if (!runner || !runner->currentRoom || !runner->currentRoom->name ||
+            strcmp(runner->currentRoom->name, g_d3d9TraceRoom)) return false;
+    }
+    g_d3d9TraceSurfaces--;
+    return true;
+}
+#define SURF_TRACE(...) do { if (d3d9TraceOn(dr)) logInfo(__VA_ARGS__); } while (0)
 
 enum { D3D9_PAGE_IDLE, D3D9_PAGE_QUEUED, D3D9_PAGE_READY, D3D9_PAGE_BAD };
 
@@ -1912,7 +1926,13 @@ static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, i
     // A surface cannot be drawn onto itself; one never resolved is still empty.
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     D3D9Surface* surf = d3d9Surface(dr, surfaceID);
-    if (!surf || !surf->hasContent || surfaceID == dr->boundTarget || sw <= 0 || sh <= 0) return;
+    SURF_TRACE("SURF draw id=%d bound=%d content=%d src=%d,%d %dx%d at %.0f,%.0f scale %.2f,%.2f alpha=%.2f frame=%u\n",
+               surfaceID, dr->boundTarget, surf ? surf->hasContent : -1, sl, st, sw, sh, x, y, xs, ys, alpha,
+               dr->frameCounter);
+    if (!surf || !surf->hasContent || surfaceID == dr->boundTarget) return;
+    if (sw < 0) sw = surf->w - sl; // the core passes -1 for "the whole surface" (draw_surface, _ext, _stretched)
+    if (sh < 0) sh = surf->h - st;
+    if (sw <= 0 || sh <= 0) return;
     float px[4] = { 0.0f, sw * xs, sw * xs, 0.0f };
     float py[4] = { 0.0f, 0.0f, sh * ys, sh * ys };
     float rad = angle * (3.14159265f / 180.0f), cs = cosf(rad), sn = sinf(rad);
@@ -2238,13 +2258,16 @@ static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h) {
         arrput(s, blank);
         dr->surfaces = s;
     }
-    return d3d9CreateSurfaceObjects(dr, &s[id], w, h) ? id : -1;
+    bool made = d3d9CreateSurfaceObjects(dr, &s[id], w, h);
+    SURF_TRACE("SURF create %dx%d -> %d\n", w, h, made ? id : -1);
+    return made ? id : -1;
 }
 static bool d3d9SurfaceExists(Renderer* r, int32_t id) {
     return d3d9Surface((D3D9Renderer*)r, id) != NULL;
 }
 static bool d3d9SetRenderTarget(Renderer* r, int32_t id, bool implicit) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
+    SURF_TRACE("SURF target %d (implicit=%d) from %d\n", id, implicit, dr->boundTarget);
     if (!d3d9BindTarget(dr, id)) return false;
     D3D9Surface* surf = d3d9Surface(dr, id);
     if (!surf) return true; // the back buffer: GUI passes re-apply their camera via beginGUI
@@ -2676,6 +2699,8 @@ static void d3d9GpuSetBlendModeExt(Renderer* r, int32_t sf, int32_t df, int32_t 
 }
 static void d3d9ClearScreen(Renderer* r, uint32_t color, float alpha) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
+    SURF_TRACE("SURF clear bound=%d color=%06X alpha=%.2f skip=%d\n", dr->boundTarget, color, alpha,
+               dr->skipNextClearScreen);
     if (dr->skipNextClearScreen) {
         dr->skipNextClearScreen = false;
         return;

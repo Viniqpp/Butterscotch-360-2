@@ -513,6 +513,11 @@ VOID __cdecl main() {
         JsonValue* compress = JsonReader_getJsonValueByKey(configRoot, "compressTextures");
         if (compress && JsonReader_isBool(compress))
             ((D3D9Renderer*)renderer)->compressTextures = JsonReader_getBool(compress);
+        JsonValue* trace = JsonReader_getJsonValueByKey(configRoot, "traceSurfaces");
+        if (trace && JsonReader_isNumber(trace)) g_d3d9TraceSurfaces = (int)JsonReader_getDouble(trace);
+        JsonValue* traceRoom = JsonReader_getJsonValueByKey(configRoot, "traceRoom");
+        if (traceRoom && JsonReader_getString(traceRoom))
+            strncpy(g_d3d9TraceRoom, JsonReader_getString(traceRoom), sizeof(g_d3d9TraceRoom) - 1);
     }
 
     xdkLog("BS: creating VM\n");
