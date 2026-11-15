@@ -52,6 +52,7 @@ typedef struct {
     uint32_t frameCounter;
     void* loader;          // D3D9Loader: background page decoding
     float fog[4];          // gpu_set_fog colour, [3] = 1 while enabled
+    bool texRepeat;        // gpu_set_texrepeat
     bool compressTextures; // CONFIG.JSN "compressTextures": DXT5 for every page (default: only under pressure)
 
     // 1x1 white texture for primitives
@@ -97,6 +98,8 @@ typedef struct {
 } D3D9Renderer;
 
 Renderer* D3D9Renderer_create(void* pd3dDevice);
+void D3D9Renderer_setTexRepeat(Renderer* r, bool repeat);
+bool D3D9Renderer_getTexRepeat(Renderer* r);
 
 // Folder holding the precompiled <name>.xps shaders: "shaders\" next to data.win.
 extern char g_d3d9ShaderDir[256];

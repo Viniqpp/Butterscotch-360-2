@@ -124,6 +124,7 @@
   <ClCompile Include="src\xbox360-xdk\d3d9_renderer.cpp" />
   <ClCompile Include="src\xbox360-xdk\xaudio2_audio.cpp" />
   <ClCompile Include="src\xbox360-xdk\xdk_file_system.cpp" />
+  <ClCompile Include="src\xbox360-xdk\xdk_builtins.cpp" />
   <ClCompile Include="vendor\base64\*.c" />
   <ClCompile Include="vendor\bzip2\*.c" />
   <ClCompile Include="vendor\md5\md5.c" />

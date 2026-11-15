@@ -256,6 +256,8 @@ static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
     xpadMappingCount = 0;
 }
 
+void XdkBuiltins_register(VMContext* vm); // xdk_builtins.cpp
+
 // ===[ Main Entry Point ]===
 
 VOID __cdecl main() {
@@ -327,6 +329,30 @@ VOID __cdecl main() {
             fclose(testFile);
             dataWinPath = launchPath;
             xdkLog("BS: game_change target %s\n", dataWinPath);
+        }
+    }
+
+    // game:\BOOT.TXT ("chapter3_windows\data.win", optionally followed by a line of
+    // arguments) skips straight to that game: used for unattended tests and by players
+    // who want one chapter only.
+    static char bootPath[260], bootArgs[256];
+    if (!dataWinPath) {
+        FILE* boot = fopen("game:\\BOOT.TXT", "rb");
+        if (boot) {
+            char line[200] = "";
+            if (fgets(line, sizeof(line), boot)) {
+                line[strcspn(line, "\r\n")] = 0;
+                if (fgets(bootArgs, sizeof(bootArgs), boot)) bootArgs[strcspn(bootArgs, "\r\n")] = 0;
+                sprintf(bootPath, "game:\\%s", line);
+                FILE* testFile = fopen(bootPath, "rb");
+                if (testFile) {
+                    fclose(testFile);
+                    dataWinPath = bootPath;
+                    if (bootArgs[0]) launchArgs = bootArgs;
+                    xdkLog("BS: BOOT.TXT target %s\n", dataWinPath);
+                }
+            }
+            fclose(boot);
         }
     }
 
@@ -452,6 +478,7 @@ VOID __cdecl main() {
 
     xdkLog("BS: creating VM\n");
     VMContext* vm = VM_create(dataWin);
+    if (vm) XdkBuiltins_register(vm);
     // CONFIG.JSN "disassemble": ["gml_Object_x_Draw_0", ...] dumps those scripts to the log
     JsonValue* disasm = configRoot ? JsonReader_getJsonValueByKey(configRoot, "disassemble") : NULL;
     if (vm && disasm && JsonReader_isArray(disasm)) {

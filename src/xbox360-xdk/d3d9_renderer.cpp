@@ -607,7 +607,10 @@ static void d3d9PickCacheDir(D3D9Loader* L) {
     memcpy(dir, g_d3d9DataWinPath, dirLen);
     sprintf(dir + dirLen, "texcache_%08X\\", (unsigned)size);
     for (int attempt = 0; attempt < 2; attempt++) {
-        CreateDirectoryA(dir, NULL); // the trailing backslash is accepted
+        char bare[256]; // Xenia rejects a trailing backslash on CreateDirectory
+        strcpy(bare, dir);
+        bare[strlen(bare) - 1] = 0;
+        CreateDirectoryA(bare, NULL);
         char probe[300];
         sprintf(probe, "%sprobe.tmp", dir);
         HANDLE p = CreateFileA(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
@@ -998,8 +1001,8 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     // Point filtering — pixel-perfect for 2D sprite games like Undertale
     dev->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
     dev->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
-    dev->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-    dev->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    dev->SetSamplerState(0, D3DSAMP_ADDRESSU, (dr->texRepeat ? D3DTADDRESS_WRAP : D3DTADDRESS_CLAMP));
+    dev->SetSamplerState(0, D3DSAMP_ADDRESSV, (dr->texRepeat ? D3DTADDRESS_WRAP : D3DTADDRESS_CLAMP));
 }
 
 static void d3d9EndFrame(Renderer* renderer) {
@@ -1647,9 +1650,17 @@ static int32_t d3d9CreateSpriteFromSurfaceModern(Renderer* renderer, int32_t sur
     return (int32_t)si;
 }
 
+// Frees a sprite made at runtime (sprite_create_from_surface, sprite_duplicate):
+// textureCount 0 marks the slot reusable. Data.win sprites are left alone.
+// shortcut: the texture page behind a surface sprite is kept (duplicates may share it).
 static void d3d9DeleteSprite(Renderer* renderer, int32_t spriteIndex) {
-    (void)renderer; (void)spriteIndex;
-    // TODO: implement dynamic sprite deletion
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    DataWin* dw = renderer->dataWin;
+    if (!dw || spriteIndex < (int32_t)dr->originalSpriteCount || (uint32_t)spriteIndex >= dw->sprt.count) return;
+    Sprite* s = &dw->sprt.sprites[spriteIndex];
+    free(s->tpagIndices);
+    s->tpagIndices = NULL;
+    s->textureCount = 0;
 }
 
 
@@ -2344,8 +2355,8 @@ static void d3d9TextureSetStage(Renderer* r, int32_t slot, uint32_t texID) {
         dev->SetTexture(slot, page != -1 ? (IDirect3DBaseTexture9*)d3d9TextureForIndex(dr, page) : NULL);
         dev->SetSamplerState(slot, D3DSAMP_MINFILTER, D3DTEXF_POINT);
         dev->SetSamplerState(slot, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
-        dev->SetSamplerState(slot, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-        dev->SetSamplerState(slot, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        dev->SetSamplerState(slot, D3DSAMP_ADDRESSU, (dr->texRepeat ? D3DTADDRESS_WRAP : D3DTADDRESS_CLAMP));
+        dev->SetSamplerState(slot, D3DSAMP_ADDRESSV, (dr->texRepeat ? D3DTADDRESS_WRAP : D3DTADDRESS_CLAMP));
         return;
     }
     if (slot != 0) return;
@@ -2731,4 +2742,21 @@ Renderer* D3D9Renderer_create(void* pd3dDevice) {
     dr->pd3dDevice = pd3dDevice;
     dr->currentTextureIndex = -1;
     return (Renderer*)dr;
+}
+
+// gpu_set_texrepeat (registered in xdk_builtins.cpp): wrap instead of clamp on every sampler.
+void D3D9Renderer_setTexRepeat(Renderer* r, bool repeat) {
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    if (dr->texRepeat == repeat) return;
+    flushBatch(dr);
+    dr->texRepeat = repeat;
+    DWORD mode = repeat ? D3DTADDRESS_WRAP : D3DTADDRESS_CLAMP;
+    for (DWORD s = 0; s < 4; s++) {
+        Dev(dr)->SetSamplerState(s, D3DSAMP_ADDRESSU, mode);
+        Dev(dr)->SetSamplerState(s, D3DSAMP_ADDRESSV, mode);
+    }
+}
+
+bool D3D9Renderer_getTexRepeat(Renderer* r) {
+    return ((D3D9Renderer*)r)->texRepeat;
 }
