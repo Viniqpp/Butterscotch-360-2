@@ -363,6 +363,19 @@ static bool d3d9UploadPage(D3D9Renderer* dr, uint32_t i, uint8_t* data, int w, i
     bool dxt = w < 0;
     if (dxt) w = -w;
     uint32_t bytes = dxt ? (uint32_t)w * (uint32_t)h : (uint32_t)w * (uint32_t)h * 4u;
+    uint8_t* blocks = NULL;
+    // Full-size page does not fit beside everything drawn this frame: compress it
+    // here (the data is already in the 0xAARRGGBB words DXT encoding reads).
+    if (!dxt && w % 4 == 0 && h % 4 == 0 && !d3d9MakeRoom(dr, bytes, dr->maxTextureBytes) &&
+        (blocks = (uint8_t*)malloc((size_t)w * h)) != NULL) {
+        if (SUCCEEDED(XGCompressSurface(blocks, (UINT)w * 4, w, h, D3DFMT_LIN_DXT5, NULL,
+                                        data, (UINT)w * 4, D3DFMT_LIN_A8R8G8B8, NULL, 0, 0.0f))) {
+            bool ok = d3d9UploadPage(dr, i, blocks, -w, h);
+            free(blocks);
+            return ok;
+        }
+        free(blocks);
+    }
     if (!d3d9MakeRoom(dr, bytes, dr->maxTextureBytes)) {
         logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
                 i, dr->textureBytesAllocated >> 20);

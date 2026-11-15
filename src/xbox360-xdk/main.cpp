@@ -621,6 +621,9 @@ VOID __cdecl main() {
         while (accumulator >= targetFrameTime && !runner->shouldExit) {
             if (gameFramesRan > 0) RunnerKeyboard_beginFrame(runner->keyboard);
             updateNativeGamepad(runner, &state.Gamepad, controllerConnected);
+            // delta_time (microseconds): fixed step, so time-driven code (e.g. Deltarune
+            // Ch5's music-synced pillars/lyrics) advances in step with the game.
+            runner->deltaTime = (GMLReal)(targetFrameTime * 1000000.0);
             Runner_step(runner);
             accumulator -= targetFrameTime;
             gameFramesRan++;
