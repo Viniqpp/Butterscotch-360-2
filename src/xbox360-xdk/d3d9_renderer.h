@@ -51,6 +51,7 @@ typedef struct {
     uint8_t* pageFailed;   // decode/upload failed: do not retry every draw
     uint32_t frameCounter;
     void* loader;          // D3D9Loader: background page decoding
+    float fog[4];          // gpu_set_fog colour, [3] = 1 while enabled
     bool compressTextures; // CONFIG.JSN "compressTextures": DXT5 for every page (default: only under pressure)
 
     // 1x1 white texture for primitives
@@ -99,3 +100,6 @@ Renderer* D3D9Renderer_create(void* pd3dDevice);
 
 // Folder holding the precompiled <name>.xps shaders: "shaders\" next to data.win.
 extern char g_d3d9ShaderDir[256];
+
+// data.win the loader threads read texture blobs from (and key the cache on).
+extern char g_d3d9DataWinPath[256];

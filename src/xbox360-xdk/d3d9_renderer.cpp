@@ -2,6 +2,7 @@
 #include <d3d9.h>
 #include <d3dx9.h>
 #include <xgraphics.h>
+#include <xcompress.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -45,11 +46,17 @@ static const char* g_vsSource =
     "  return o;\n"
     "}\n";
 
+// gpu_set_fog: c223 = fog colour, .a = 1 while fog is on (RGB replaced, alpha kept).
+// c223 sits above the registers translated GameMaker shaders use, so it survives shader switches.
+#define D3D9_FOG_REGISTER 223
 static const char* g_psSource =
     "sampler2D s0 : register(s0);\n"
+    "float4 fog : register(c223);\n"
     "struct PS_IN { float2 Tex : TEXCOORD0; float4 Col : TEXCOORD1; };\n"
     "float4 main(PS_IN i) : COLOR0 {\n"
-    "  return tex2D(s0, i.Tex) * i.Col;\n"
+    "  float4 c = tex2D(s0, i.Tex) * i.Col;\n"
+    "  c.rgb = lerp(c.rgb, fog.rgb, fog.a);\n"
+    "  return c;\n"
     "}\n";
 
 // ===[ Helpers ]===
@@ -302,22 +309,29 @@ static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes, uint32_t limit) {
 // ===[ Texture pages ]===
 // Pages are decoded (PNG / QOI / BZip2+QOI) on worker threads into their final
 // upload format, so the frame never waits for a decode: a page that is not
-// ready yet is skipped for a frame or two (sprites pop in instead of the game
-// freezing). Only the upload (one memcpy into the texture) runs on the main thread.
+// ready yet is skipped for a frame or two. Decoded pages are also kept in a
+// lossless LZX cache on disk (game:\texcache_<size>\ or, when the game folder is
+// read-only as in Xenia, the cache: utility drive), which loads several times
+// faster than decoding. Idle workers fill that cache in the background.
 
 #define D3D9_LOADER_THREADS 3 // Xenon hardware threads 2-4; 0 runs the game, 1 and 5 stay free for audio/system
+#define D3D9_PREFETCH 0x80000000u // queue entry flag: only build the cache for this page
+#define D3D9_CACHE_MAGIC 0x42534331u // "BSC1"
+
+char g_d3d9DataWinPath[256];
 
 enum { D3D9_PAGE_IDLE, D3D9_PAGE_QUEUED, D3D9_PAGE_READY, D3D9_PAGE_BAD };
 
 typedef struct {
     CRITICAL_SECTION lock;
-    HANDLE wake; // semaphore: one count per queued page
+    HANDLE wake; // semaphore: one count per queue entry
     HANDLE threads[D3D9_LOADER_THREADS];
     volatile bool quit;
     bool qoiTitle; // GMS 2022.5+: BZip2+QOI blobs
     DataWin* dw;
-    uint32_t* queue; // ring of page ids; a page is queued at most once
-    uint32_t head, tail, cap;
+    char cacheDir[256]; // empty: no writable cache
+    uint32_t* queue; // ring: on-demand pages at the head, prefetch entries at the tail
+    uint32_t head, count, cap;
     uint8_t* state;
     uint8_t* dxt;    // requested format per page
     uint8_t** out;   // decoded page in upload format
@@ -325,56 +339,56 @@ typedef struct {
     int32_t* outH;
 } D3D9Loader;
 
-// CPU half of a page load (any thread). Returns ARGB words (linear) or DXT5 blocks.
-static uint8_t* d3d9DecodePage(const uint8_t* blob, uint32_t size, bool qoiTitle, bool dxt,
-                               int* outW, int* outH) {
+// Turns 0xAARRGGBB words into DXT5 blocks (w*h bytes); NULL if it cannot.
+// Transparent texels first take the last visible colour in their row, or DXT
+// colour blocks bleed black into sprite edges. Modifies `words`.
+static uint8_t* d3d9ToDxt(uint8_t* words, int w, int h) {
+    if (w % 4 || h % 4) return NULL;
+    DWORD* px = (DWORD*)words;
+    for (int y = 0; y < h; y++) {
+        DWORD carry = 0;
+        for (int x = 0; x < w; x++) {
+            DWORD* p = px + (size_t)y * w + x;
+            if (*p >> 24) carry = *p; else *p = carry & 0x00FFFFFF;
+        }
+    }
+    uint8_t* blocks = (uint8_t*)malloc((size_t)w * h);
+    if (blocks && FAILED(XGCompressSurface(blocks, (UINT)w * 4, w, h, D3DFMT_LIN_DXT5, NULL,
+                                           words, (UINT)w * 4, D3DFMT_LIN_A8R8G8B8, NULL, 0, 0.0f))) {
+        free(blocks);
+        blocks = NULL;
+    }
+    return blocks;
+}
+
+// Decodes a TXTR blob into 0xAARRGGBB words (any thread).
+static uint8_t* d3d9DecodePage(const uint8_t* blob, uint32_t size, bool qoiTitle, int* outW, int* outH) {
     int w = 0, h = 0;
     uint8_t* rgba = ImageDecoder_decodeToRgba((uint8_t*)blob, size, qoiTitle, &w, &h);
     if (!rgba) return NULL;
     if (w <= 0 || h <= 0 || w > 8192 || h > 8192) { free(rgba); return NULL; }
     *outW = w; *outH = h;
     DWORD* words = (DWORD*)rgba; // in place: RGBA bytes -> 0xAARRGGBB words
-    for (int y = 0; y < h; y++) {
-        DWORD carry = 0;
-        for (int x = 0; x < w; x++) {
-            uint8_t* p = rgba + ((size_t)y * w + x) * 4;
-            DWORD word = p[3] ? D3DCOLOR_ARGB(p[3], p[0], p[1], p[2]) : 0;
-            // DXT: transparent texels take the last visible colour in their row,
-            // or colour blocks bleed black into sprite edges.
-            if (dxt) { if (p[3]) carry = word; else word = carry & 0x00FFFFFF; }
-            words[(size_t)y * w + x] = word;
-        }
+    for (size_t k = 0, n = (size_t)w * h; k < n; k++) {
+        uint8_t* p = rgba + k * 4;
+        words[k] = p[3] ? D3DCOLOR_ARGB(p[3], p[0], p[1], p[2]) : 0;
     }
-    if (!dxt || w % 4 || h % 4) return rgba;
-    uint8_t* blocks = (uint8_t*)malloc((size_t)w * h); // DXT5: 16 bytes per 4x4 block
-    if (blocks && FAILED(XGCompressSurface(blocks, (UINT)w * 4, w, h, D3DFMT_LIN_DXT5, NULL,
-                                           rgba, (UINT)w * 4, D3DFMT_LIN_A8R8G8B8, NULL, 0, 0.0f))) {
-        free(blocks);
-        blocks = NULL;
-    }
-    if (!blocks) return rgba; // fall back to the uncompressed page
-    free(rgba);
-    *outW = -w; // negative width marks DXT data for the upload
-    return blocks;
+    return rgba;
 }
 
-// GPU half (main thread): copies a decoded page into a new texture.
+// GPU half (main thread): copies a decoded page into a new texture. Negative w = DXT5 blocks.
 static bool d3d9UploadPage(D3D9Renderer* dr, uint32_t i, uint8_t* data, int w, int h) {
     bool dxt = w < 0;
     if (dxt) w = -w;
     uint32_t bytes = dxt ? (uint32_t)w * (uint32_t)h : (uint32_t)w * (uint32_t)h * 4u;
-    uint8_t* blocks = NULL;
-    // Full-size page does not fit beside everything drawn this frame: compress it
-    // here (the data is already in the 0xAARRGGBB words DXT encoding reads).
-    if (!dxt && w % 4 == 0 && h % 4 == 0 && !d3d9MakeRoom(dr, bytes, dr->maxTextureBytes) &&
-        (blocks = (uint8_t*)malloc((size_t)w * h)) != NULL) {
-        if (SUCCEEDED(XGCompressSurface(blocks, (UINT)w * 4, w, h, D3DFMT_LIN_DXT5, NULL,
-                                        data, (UINT)w * 4, D3DFMT_LIN_A8R8G8B8, NULL, 0, 0.0f))) {
+    // Full-size page does not fit beside everything drawn this frame: compress it.
+    if (!dxt && !d3d9MakeRoom(dr, bytes, dr->maxTextureBytes)) {
+        uint8_t* blocks = d3d9ToDxt(data, w, h);
+        if (blocks) {
             bool ok = d3d9UploadPage(dr, i, blocks, -w, h);
             free(blocks);
             return ok;
         }
-        free(blocks);
     }
     if (!d3d9MakeRoom(dr, bytes, dr->maxTextureBytes)) {
         logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
@@ -413,49 +427,146 @@ static bool d3d9WantDxt(D3D9Renderer* dr, Texture* t) {
                          dr->maxTextureBytes / 4 * 3);
 }
 
-static void d3d9DropBlob(D3D9Renderer* dr, uint32_t i) {
-    // Lazy mode: drop the compressed blob once uploaded; an evicted page re-reads it from disk.
-    Texture* t = &dr->base.dataWin->txtr.textures[i];
-    if (dr->base.dataWin->lazyLoadTextures) { free(t->blobData); t->blobData = NULL; }
-}
-
-static bool d3d9ReadBlob(D3D9Renderer* dr, uint32_t i) {
-    Texture* t = &dr->base.dataWin->txtr.textures[i];
-    DataWin_loadTxtrIfNeeded(dr->base.dataWin, i);
-    if (t->blobData && t->blobSize > 0 && t->blobSize <= 32u * 1024u * 1024u) return true;
-    logInfo("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, t->blobSize);
-    return false;
-}
-
 // Synchronous load, used when no worker threads could be started.
 static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
-    if (!d3d9ReadBlob(dr, i)) return false;
-    Texture* t = &dr->base.dataWin->txtr.textures[i];
+    DataWin* dw = dr->base.dataWin;
+    Texture* t = &dw->txtr.textures[i];
+    DataWin_loadTxtrIfNeeded(dw, i);
+    if (!t->blobData || t->blobSize == 0 || t->blobSize > 32u * 1024u * 1024u) {
+        logInfo("BS: invalid or oversized TXTR blob for page %u (size=%u)\n", i, t->blobSize);
+        return false;
+    }
     int w = 0, h = 0;
     uint8_t* data = d3d9DecodePage(t->blobData, t->blobSize,
-        DataWin_isVersionAtLeast(dr->base.dataWin, 2022, 5, 0, 0), d3d9WantDxt(dr, t), &w, &h);
-    bool ok = data && d3d9UploadPage(dr, i, data, w, h);
-    if (!data) logWarn("BS: could not decode TXTR page %u\n", i);
+                                   DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0), &w, &h);
+    if (dw->lazyLoadTextures) { free(t->blobData); t->blobData = NULL; }
+    if (!data) { logWarn("BS: could not decode TXTR page %u\n", i); return false; }
+    if (d3d9WantDxt(dr, t)) {
+        uint8_t* blocks = d3d9ToDxt(data, w, h);
+        if (blocks) { free(data); data = blocks; w = -w; }
+    }
+    bool ok = d3d9UploadPage(dr, i, data, w, h);
     free(data);
-    d3d9DropBlob(dr, i);
     return ok;
+}
+
+// ---- Disk cache: { magic, w, h, packed size } + LZX(0xAARRGGBB words) ----
+
+static uint8_t* d3d9CacheRead(D3D9Loader* L, XMEMDECOMPRESSION_CONTEXT dctx, uint32_t page, int* w, int* h) {
+    char path[300];
+    sprintf(path, "%sp%u.bin", L->cacheDir, page);
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return NULL;
+    DWORD hdr[4], got = 0;
+    uint8_t *packed = NULL, *data = NULL;
+    if (ReadFile(f, hdr, sizeof(hdr), &got, NULL) && got == sizeof(hdr) && hdr[0] == D3D9_CACHE_MAGIC &&
+        hdr[1] - 1u < 8192u && hdr[2] - 1u < 8192u && hdr[3] <= 64u * 1024u * 1024u &&
+        (packed = (uint8_t*)malloc(hdr[3])) != NULL &&
+        ReadFile(f, packed, hdr[3], &got, NULL) && got == hdr[3]) {
+        SIZE_T size = (SIZE_T)hdr[1] * hdr[2] * 4u;
+        data = (uint8_t*)malloc(size);
+        SIZE_T outSize = size;
+        if (data && (FAILED(XMemDecompress(dctx, data, &outSize, packed, hdr[3])) || outSize != size)) {
+            free(data);
+            data = NULL;
+        }
+        *w = (int)hdr[1];
+        *h = (int)hdr[2];
+    }
+    free(packed);
+    CloseHandle(f);
+    return data;
+}
+
+static void d3d9CacheWrite(D3D9Loader* L, XMEMCOMPRESSION_CONTEXT cctx, uint32_t page,
+                           const uint8_t* data, int w, int h) {
+    SIZE_T size = (SIZE_T)w * h * 4u, packedSize = size + size / 8 + 4096; // LZX worst case grows a little
+    uint8_t* packed = (uint8_t*)malloc(packedSize);
+    if (!packed) return;
+    if (SUCCEEDED(XMemCompress(cctx, packed, &packedSize, data, size))) {
+        char tmp[300], path[300];
+        sprintf(tmp, "%sp%u.tmp", L->cacheDir, page);
+        sprintf(path, "%sp%u.bin", L->cacheDir, page);
+        HANDLE f = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (f != INVALID_HANDLE_VALUE) {
+            DWORD hdr[4] = { D3D9_CACHE_MAGIC, (DWORD)w, (DWORD)h, (DWORD)packedSize }, put = 0, put2 = 0;
+            bool ok = WriteFile(f, hdr, sizeof(hdr), &put, NULL) && WriteFile(f, packed, (DWORD)packedSize, &put2, NULL) &&
+                      put == sizeof(hdr) && put2 == packedSize;
+            CloseHandle(f);
+            // written under a temporary name so a crash never leaves a truncated .bin
+            if (!ok || !MoveFileA(tmp, path)) DeleteFileA(tmp);
+        }
+    }
+    free(packed);
+}
+
+static bool d3d9CacheExists(D3D9Loader* L, uint32_t page) {
+    char path[300];
+    sprintf(path, "%sp%u.bin", L->cacheDir, page);
+    return GetFileAttributesA(path) != (DWORD)-1;
+}
+
+// Reads a page's compressed blob with the worker's own data.win handle (the
+// runner's lazy-load FILE* belongs to the main thread).
+static uint8_t* d3d9ReadBlobAsync(D3D9Loader* L, HANDLE file, uint32_t page, uint32_t* size) {
+    Texture* t = &L->dw->txtr.textures[page];
+    *size = t->blobSize;
+    if (t->blobSize == 0 || t->blobSize > 32u * 1024u * 1024u) return NULL;
+    uint8_t* blob = (uint8_t*)malloc(t->blobSize);
+    if (!blob) return NULL;
+    if (!L->dw->lazyLoadTextures && t->blobData) { // whole data.win already in memory: never freed
+        memcpy(blob, t->blobData, t->blobSize);
+        return blob;
+    }
+    OVERLAPPED at;
+    memset(&at, 0, sizeof(at));
+    at.Offset = t->blobOffset;
+    DWORD got = 0;
+    if (file == INVALID_HANDLE_VALUE || t->blobOffset == 0 ||
+        (!ReadFile(file, blob, t->blobSize, &got, &at) && GetLastError() != ERROR_IO_PENDING) ||
+        (!got && !GetOverlappedResult(file, &at, &got, TRUE)) || got != t->blobSize) {
+        free(blob);
+        return NULL;
+    }
+    return blob;
 }
 
 static DWORD WINAPI d3d9LoaderThread(LPVOID arg) {
     D3D9Loader* L = (D3D9Loader*)arg;
+    HANDLE file = CreateFileA(g_d3d9DataWinPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    XMEMCOMPRESSION_CONTEXT cctx = NULL;
+    XMEMDECOMPRESSION_CONTEXT dctx = NULL;
+    if (L->cacheDir[0]) {
+        XMemCreateCompressionContext(XMEMCODEC_LZX, NULL, 0, &cctx);
+        XMemCreateDecompressionContext(XMEMCODEC_LZX, NULL, 0, &dctx);
+    }
     for (;;) {
         WaitForSingleObject(L->wake, INFINITE);
-        if (L->quit) return 0;
+        if (L->quit) break;
         EnterCriticalSection(&L->lock);
-        uint32_t page = L->queue[L->head];
+        uint32_t entry = L->queue[L->head];
         L->head = (L->head + 1) % L->cap;
-        Texture* t = &L->dw->txtr.textures[page]; // blob stays put until the page is READY
-        const uint8_t* blob = t->blobData;
-        uint32_t size = t->blobSize;
+        L->count--;
+        uint32_t page = entry & ~D3D9_PREFETCH;
+        bool prefetch = (entry & D3D9_PREFETCH) != 0;
         bool dxt = L->dxt[page] != 0;
         LeaveCriticalSection(&L->lock);
+        if (prefetch && (!cctx || d3d9CacheExists(L, page))) continue;
+
         int w = 0, h = 0;
-        uint8_t* data = d3d9DecodePage(blob, size, L->qoiTitle, dxt, &w, &h);
+        uint8_t* data = dctx ? d3d9CacheRead(L, dctx, page, &w, &h) : NULL;
+        if (!data) {
+            uint32_t size = 0;
+            uint8_t* blob = d3d9ReadBlobAsync(L, file, page, &size);
+            if (blob) data = d3d9DecodePage(blob, size, L->qoiTitle, &w, &h);
+            free(blob);
+            if (data && cctx && !d3d9CacheExists(L, page)) d3d9CacheWrite(L, cctx, page, data, w, h);
+        }
+        if (prefetch) { free(data); continue; }
+        if (data && dxt) {
+            uint8_t* blocks = d3d9ToDxt(data, w, h);
+            if (blocks) { free(data); data = blocks; w = -w; }
+        }
         EnterCriticalSection(&L->lock);
         L->out[page] = data;
         L->outW[page] = w;
@@ -463,6 +574,58 @@ static DWORD WINAPI d3d9LoaderThread(LPVOID arg) {
         L->state[page] = data ? D3D9_PAGE_READY : D3D9_PAGE_BAD;
         LeaveCriticalSection(&L->lock);
     }
+    if (cctx) XMemDestroyCompressionContext(cctx);
+    if (dctx) XMemDestroyDecompressionContext(dctx);
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    return 0;
+}
+
+// Must be called with L->lock held.
+static void d3d9LoaderPush(D3D9Loader* L, uint32_t entry, bool front) {
+    if (L->count == L->cap) return; // cannot happen: at most one on-demand and one prefetch entry per page
+    if (front) {
+        L->head = (L->head + L->cap - 1) % L->cap;
+        L->queue[L->head] = entry;
+    } else {
+        L->queue[(L->head + L->count) % L->cap] = entry;
+    }
+    L->count++;
+    ReleaseSemaphore(L->wake, 1, NULL);
+}
+
+// Picks a writable cache folder for this data.win: next to it, else the cache: drive.
+static void d3d9PickCacheDir(D3D9Loader* L) {
+    char dir[256];
+    DWORD size = 0;
+    HANDLE f = CreateFileA(g_d3d9DataWinPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    size = GetFileSize(f, NULL); // a different data.win (game update) gets a fresh cache
+    CloseHandle(f);
+    const char* slash = strrchr(g_d3d9DataWinPath, '\\');
+    size_t dirLen = slash ? (size_t)(slash - g_d3d9DataWinPath + 1) : 0;
+    if (dirLen + 24 >= sizeof(dir)) return;
+    memcpy(dir, g_d3d9DataWinPath, dirLen);
+    sprintf(dir + dirLen, "texcache_%08X\\", (unsigned)size);
+    for (int attempt = 0; attempt < 2; attempt++) {
+        CreateDirectoryA(dir, NULL); // the trailing backslash is accepted
+        char probe[300];
+        sprintf(probe, "%sprobe.tmp", dir);
+        HANDLE p = CreateFileA(probe, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+        if (p != INVALID_HANDLE_VALUE) {
+            CloseHandle(p);
+            DeleteFileA(probe);
+            strcpy(L->cacheDir, dir);
+            logInfo("D3D9: texture cache at %s\n", dir);
+            return;
+        }
+        // Read-only game folder (Xenia): the title's utility drive. The name keys on the
+        // folder path too, so each Deltarune chapter keeps its own pages.
+        if (attempt == 0 && XMountUtilityDrive(FALSE, 16384, 65536) != ERROR_SUCCESS) break;
+        uint32_t hash = 2166136261u;
+        for (const char* c = g_d3d9DataWinPath; *c; c++) hash = (hash ^ (uint8_t)*c) * 16777619u;
+        sprintf(dir, "cache:\\bs_%08X_%08X\\", (unsigned)hash, (unsigned)size);
+    }
+    logWarn("%s", "D3D9: no writable texture cache; pages are decoded every time\n");
 }
 
 static void d3d9LoaderStart(D3D9Renderer* dr, DataWin* dw) {
@@ -472,14 +635,14 @@ static void d3d9LoaderStart(D3D9Renderer* dr, DataWin* dw) {
     if (!L) return;
     L->dw = dw;
     L->qoiTitle = DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0);
-    L->cap = n;
-    L->queue = (uint32_t*)calloc(n, sizeof(uint32_t));
+    L->cap = n * 2;
+    L->queue = (uint32_t*)calloc(L->cap, sizeof(uint32_t));
     L->state = (uint8_t*)calloc(n, 1);
     L->dxt = (uint8_t*)calloc(n, 1);
     L->out = (uint8_t**)calloc(n, sizeof(uint8_t*));
     L->outW = (int32_t*)calloc(n, sizeof(int32_t));
     L->outH = (int32_t*)calloc(n, sizeof(int32_t));
-    L->wake = CreateSemaphore(NULL, 0, (LONG)n + D3D9_LOADER_THREADS, NULL);
+    L->wake = CreateSemaphore(NULL, 0, (LONG)L->cap + D3D9_LOADER_THREADS, NULL);
     if (!L->queue || !L->state || !L->dxt || !L->out || !L->outW || !L->outH || !L->wake) {
         logWarn("%s", "D3D9: texture loader unavailable, decoding on the main thread\n");
         if (L->wake) CloseHandle(L->wake);
@@ -487,6 +650,12 @@ static void d3d9LoaderStart(D3D9Renderer* dr, DataWin* dw) {
         return;
     }
     InitializeCriticalSection(&L->lock);
+    d3d9PickCacheDir(L);
+    if (L->cacheDir[0]) { // build the whole cache in the background, page order
+        EnterCriticalSection(&L->lock);
+        for (uint32_t i = 0; i < n; i++) d3d9LoaderPush(L, i | D3D9_PREFETCH, false);
+        LeaveCriticalSection(&L->lock);
+    }
     for (int k = 0; k < D3D9_LOADER_THREADS; k++) {
         // 256 KB stack: the BZip2 decoder keeps sizeable locals
         L->threads[k] = CreateThread(NULL, 256 * 1024, d3d9LoaderThread, L, CREATE_SUSPENDED, NULL);
@@ -508,31 +677,28 @@ static void d3d9LoaderStop(D3D9Renderer* dr) {
         WaitForSingleObject(L->threads[k], INFINITE);
         CloseHandle(L->threads[k]);
     }
-    for (uint32_t i = 0; i < L->cap; i++) free(L->out[i]);
+    for (uint32_t i = 0; i < L->cap / 2; i++) free(L->out[i]);
     CloseHandle(L->wake);
     DeleteCriticalSection(&L->lock);
     free(L->queue); free(L->state); free(L->dxt); free(L->out); free(L->outW); free(L->outH); free(L);
     dr->loader = NULL;
 }
 
-// Queues the page if needed and uploads it once decoded. With `wait`, blocks
-// until it is ready (texture size queries and primitives cannot skip a frame).
+// Queues the page (ahead of background work) and uploads it once decoded. With
+// `wait`, blocks until it is ready (size queries and primitives cannot skip a frame).
 static void d3d9LoaderRequest(D3D9Renderer* dr, uint32_t i, bool wait) {
     D3D9Loader* L = (D3D9Loader*)dr->loader;
     EnterCriticalSection(&L->lock);
     uint8_t st = L->state[i];
-    LeaveCriticalSection(&L->lock);
     if (st == D3D9_PAGE_IDLE) {
-        if (!d3d9ReadBlob(dr, i)) { dr->pageFailed[i] = 1; return; }
-        bool dxt = d3d9WantDxt(dr, &dr->base.dataWin->txtr.textures[i]);
+        LeaveCriticalSection(&L->lock);
+        bool dxt = d3d9WantDxt(dr, &dr->base.dataWin->txtr.textures[i]); // may evict pages: outside the lock
         EnterCriticalSection(&L->lock);
         L->dxt[i] = dxt;
         L->state[i] = st = D3D9_PAGE_QUEUED;
-        L->queue[L->tail] = i;
-        L->tail = (L->tail + 1) % L->cap;
-        LeaveCriticalSection(&L->lock);
-        ReleaseSemaphore(L->wake, 1, NULL);
+        d3d9LoaderPush(L, i, true);
     }
+    LeaveCriticalSection(&L->lock);
     while (st == D3D9_PAGE_QUEUED) {
         if (!wait) return;
         Sleep(1);
@@ -541,10 +707,10 @@ static void d3d9LoaderRequest(D3D9Renderer* dr, uint32_t i, bool wait) {
         LeaveCriticalSection(&L->lock);
     }
     // READY or BAD: the workers are done with this page
+    EnterCriticalSection(&L->lock);
     uint8_t* data = L->out[i];
     int w = L->outW[i], h = L->outH[i];
     L->out[i] = NULL;
-    EnterCriticalSection(&L->lock);
     L->state[i] = D3D9_PAGE_IDLE;
     LeaveCriticalSection(&L->lock);
     if (!data || !d3d9UploadPage(dr, i, data, w, h)) {
@@ -552,7 +718,6 @@ static void d3d9LoaderRequest(D3D9Renderer* dr, uint32_t i, bool wait) {
         dr->pageFailed[i] = 1;
     }
     free(data);
-    d3d9DropBlob(dr, i);
 }
 
 // Every page lookup goes through here: loads on first use and marks it used this frame.
@@ -1941,10 +2106,13 @@ static void d3d9BlitTexture(D3D9Renderer* dr, void* tex, int32_t allocW, int32_t
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
     dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
     dev->SetPixelShader((IDirect3DPixelShader9*)dr->pPixelShader);
+    static const float noFog[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    dev->SetPixelShaderConstantF(D3D9_FOG_REGISTER, noFog, 1);
     float xs[4] = { dx, dx + w, dx + w, dx }, ys[4] = { dy, dy, dy + h, dy + h };
     d3d9DrawTextureQuad(dr, tex, xs, ys, (float)sx / allocW, (float)sy / allocH,
                         (float)(sx + w) / allocW, (float)(sy + h) / allocH, 0xFFFFFF, 1.0f);
     dev->SetPixelShader(shader);
+    dev->SetPixelShaderConstantF(D3D9_FOG_REGISTER, dr->fog, 1);
     if (shader) shader->Release();
     dev->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
     dev->SetRenderState(D3DRS_ALPHABLENDENABLE, blend);
@@ -2333,6 +2501,14 @@ static void d3d9GpuSetAlphaTestRef(Renderer* r, uint8_t ref) {
     flushBatch((D3D9Renderer*)r);
     Dev((D3D9Renderer*)r)->SetRenderState(D3DRS_ALPHAREF, ref);
 }
+static void d3d9GpuSetFog(Renderer* r, bool enable, uint32_t color, float start, float end) {
+    (void)start; (void)end; // 2D fog is all-or-nothing, as in GameMaker
+    D3D9Renderer* dr = (D3D9Renderer*)r;
+    flushBatch(dr);
+    bgrToFloatColor(color, enable ? 1.0f : 0.0f, &dr->fog[0], &dr->fog[1], &dr->fog[2], &dr->fog[3]);
+    Dev(dr)->SetPixelShaderConstantF(D3D9_FOG_REGISTER, dr->fog, 1);
+}
+
 static void d3d9GpuSetColorWriteEnable(Renderer* r, bool red, bool green, bool blue, bool alpha) {
     flushBatch((D3D9Renderer*)r);
     DWORD mask = (red ? D3DCOLORWRITEENABLE_RED : 0) |
@@ -2506,6 +2682,7 @@ static void d3d9InitializeRendererVtable(void) {
     d3d9RendererVtable.gpuGetAlphaTestEnable = d3d9GpuGetAlphaTestEnable;
     d3d9RendererVtable.gpuSetAlphaTestRef = d3d9GpuSetAlphaTestRef;
     d3d9RendererVtable.gpuSetColorWriteEnable = d3d9GpuSetColorWriteEnable;
+    d3d9RendererVtable.gpuSetFog = d3d9GpuSetFog;
     d3d9RendererVtable.gpuGetColorWriteEnable = d3d9GpuGetColorWriteEnable;
     d3d9RendererVtable.createSurface = d3d9CreateSurface;
     d3d9RendererVtable.surfaceExists = d3d9SurfaceExists;

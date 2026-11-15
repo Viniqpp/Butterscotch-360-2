@@ -349,6 +349,7 @@ VOID __cdecl main() {
         shutdownXdk(NULL, NULL, NULL, NULL, NULL, NULL, NULL, pd3dDevice, pD3D);
         return;
     }
+    if (strlen(dataWinPath) < sizeof(g_d3d9DataWinPath)) strcpy(g_d3d9DataWinPath, dataWinPath);
     { // Each data.win (e.g. every Deltarune chapter) has its own shaders\ folder.
         const char* slash = strrchr(dataWinPath, '\\');
         size_t dirLen = slash ? (size_t)(slash - dataWinPath + 1) : 0;
