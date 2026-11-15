@@ -443,6 +443,11 @@ VOID __cdecl main() {
 
     xdkLog("BS: creating renderer\n");
     Renderer* renderer = D3D9Renderer_create(pd3dDevice);
+    if (renderer && configRoot) { // CONFIG.JSN: "compressTextures": false keeps full-quality pages
+        JsonValue* compress = JsonReader_getJsonValueByKey(configRoot, "compressTextures");
+        if (compress && JsonReader_isBool(compress))
+            ((D3D9Renderer*)renderer)->compressTextures = JsonReader_getBool(compress);
+    }
 
     xdkLog("BS: creating VM\n");
     VMContext* vm = VM_create(dataWin);

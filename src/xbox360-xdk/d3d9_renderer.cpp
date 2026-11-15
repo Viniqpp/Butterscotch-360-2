@@ -281,6 +281,49 @@ static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes) {
     return true;
 }
 
+// DXT5 page: 1 byte per texel instead of 4, so about 4x more pages fit the
+// budget (Deltarune Ch5 battles need more than 16 uncompressed 2048^2 pages).
+// Alpha keeps full DXT5 precision; colour is block-compressed (lossy).
+static IDirect3DTexture9* d3d9CreateDxtTexture(D3D9Renderer* dr, uint32_t page, uint8_t* rgba,
+                                               int w, int h, uint32_t* outBytes) {
+    // In place to the 0xAARRGGBB words XGCompressSurface reads as LIN_A8R8G8B8.
+    // Transparent texels take the last visible colour in their row: DXT colour
+    // blocks would otherwise bleed black into sprite edges.
+    DWORD* words = (DWORD*)rgba;
+    for (int y = 0; y < h; y++) {
+        DWORD carry = 0;
+        for (int x = 0; x < w; x++) {
+            uint8_t* p = rgba + ((size_t)y * w + x) * 4;
+            DWORD word = p[3] ? D3DCOLOR_ARGB(p[3], p[0], p[1], p[2]) : (carry & 0x00FFFFFF);
+            if (p[3]) carry = word;
+            words[(size_t)y * w + x] = word;
+        }
+    }
+    if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h)) {
+        logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
+                page, dr->textureBytesAllocated >> 20);
+        return NULL;
+    }
+    IDirect3DDevice9* dev = Dev(dr);
+    IDirect3DTexture9* tex = NULL;
+    HRESULT hr = dev->CreateTexture(w, h, 1, 0, D3DFMT_LIN_DXT5, D3DPOOL_DEFAULT, &tex, NULL);
+    D3DLOCKED_RECT lr;
+    if (SUCCEEDED(hr) && tex) hr = tex->LockRect(0, &lr, NULL, 0);
+    if (SUCCEEDED(hr) && tex) {
+        hr = XGCompressSurface(lr.pBits, lr.Pitch, w, h, D3DFMT_LIN_DXT5, NULL,
+                               rgba, (UINT)w * 4, D3DFMT_LIN_A8R8G8B8, NULL, 0, 0.0f);
+        HRESULT unlockHr = tex->UnlockRect(0);
+        if (SUCCEEDED(hr)) hr = unlockHr;
+        *outBytes = (uint32_t)lr.Pitch * (uint32_t)(h / 4); // one pitch per 4-texel block row
+    }
+    if (FAILED(hr) || !tex) {
+        logWarn("D3D9: DXT upload failed for page %u (hr=0x%08X)\n", page, (unsigned)hr);
+        if (tex) tex->Release();
+        return NULL;
+    }
+    return tex;
+}
+
 // Decodes and uploads one TXTR page (PNG, QOI or BZip2+QOI).
 static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
     IDirect3DDevice9* dev = Dev(dr);
@@ -306,6 +349,22 @@ static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
 
         dr->textureWidths[i] = w;
         dr->textureHeights[i] = h;
+
+        if (dr->compressTextures && w % 4 == 0 && h % 4 == 0) {
+            uint32_t bytes = 0;
+            IDirect3DTexture9* compressed = d3d9CreateDxtTexture(dr, i, pixels, w, h, &bytes);
+            free(pixels);
+            if (compressed) {
+                dr->textures[i] = compressed;
+                dr->textureBytesAllocated += bytes;
+                dr->pageBytes[i] = bytes;
+            }
+            if (dr->base.dataWin->lazyLoadTextures) {
+                free(txtr->blobData);
+                txtr->blobData = NULL;
+            }
+            return compressed != NULL;
+        }
 
         // Xbox 360 textures are uploaded through a linear surface. Keep a
         // strict aggregate budget so malformed WADs cannot exhaust unified RAM.
@@ -2224,6 +2283,7 @@ Renderer* D3D9Renderer_create(void* pd3dDevice) {
     dr->base.drawAlpha = 1.0f;
     dr->base.drawFont = -1;
     dr->appSurface = -1;
+    dr->compressTextures = true;
     dr->boundTarget = -1;
     dr->pd3dDevice = pd3dDevice;
     dr->currentTextureIndex = -1;
