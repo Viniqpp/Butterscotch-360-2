@@ -189,6 +189,10 @@ static void d3d9SetProjection(D3D9Renderer* dr, const Matrix4f* view, const Matr
 }
 
 static bool d3d9BindTarget(D3D9Renderer* dr, int32_t id);
+static void d3d9ReleaseSurfaceObjects(D3D9Renderer* dr, D3D9Surface* s);
+static void d3d9BlitTexture(D3D9Renderer* dr, void* tex, int32_t allocW, int32_t allocH,
+                            int32_t sx, int32_t sy, int32_t w, int32_t h, float dx, float dy);
+static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h);
 static void d3d9FreeSurfaces(D3D9Renderer* dr);
 static void d3d9LoadUserShaders(D3D9Renderer* dr, DataWin* dw);
 static void d3d9ReleaseUserShaders(D3D9Renderer* dr);
@@ -264,7 +268,7 @@ static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes, uint32_t limit) {
     bool idled = false;
     while (dr->textureBytesAllocated + bytes > limit) {
         int32_t victim = -1;
-        for (uint32_t p = 0; p < dr->textureCount; p++)
+        for (uint32_t p = 0; p < dr->originalTexturePageCount; p++)
             if (dr->textures[p] && dr->pageLastUse[p] != dr->frameCounter &&
                 (victim < 0 || dr->pageLastUse[p] < dr->pageLastUse[victim])) victim = (int32_t)p;
         if (victim < 0) return false;
@@ -1263,13 +1267,95 @@ static void d3d9Flush(Renderer* renderer) {
     flushBatch((D3D9Renderer*)renderer);
 }
 
-static int32_t d3d9CreateSpriteFromSurface(Renderer* renderer, int32_t x, int32_t y,
-                                            int32_t w, int32_t h, bool removeback,
-                                            bool smooth, int32_t xorig, int32_t yorig) {
-    (void)renderer; (void)x; (void)y; (void)w; (void)h;
-    (void)removeback; (void)smooth; (void)xorig; (void)yorig;
-    // TODO: implement surface capture
-    return -1;
+// Grows the page tables by one; dynamic pages sit past originalTexturePageCount
+// and are never evicted (d3d9MakeRoom only scans the data.win pages).
+static int32_t d3d9AddPage(D3D9Renderer* dr, void* tex, int32_t w, int32_t h) {
+    uint32_t n = dr->textureCount + 1;
+    void* p;
+    if (!(p = realloc(dr->textures, n * sizeof(void*)))) return -1;          dr->textures = (void**)p;
+    if (!(p = realloc(dr->textureWidths, n * sizeof(int32_t)))) return -1;   dr->textureWidths = (int32_t*)p;
+    if (!(p = realloc(dr->textureHeights, n * sizeof(int32_t)))) return -1;  dr->textureHeights = (int32_t*)p;
+    if (!(p = realloc(dr->pageLastUse, n * sizeof(uint32_t)))) return -1;    dr->pageLastUse = (uint32_t*)p;
+    if (!(p = realloc(dr->pageBytes, n * sizeof(uint32_t)))) return -1;      dr->pageBytes = (uint32_t*)p;
+    if (!(p = realloc(dr->pageFailed, n))) return -1;                        dr->pageFailed = (uint8_t*)p;
+    uint32_t page = dr->textureCount;
+    dr->textures[page] = tex;
+    dr->textureWidths[page] = w;
+    dr->textureHeights[page] = h;
+    dr->pageLastUse[page] = dr->frameCounter;
+    dr->pageBytes[page] = 0;
+    dr->pageFailed[page] = 0;
+    dr->textureCount = n;
+    return (int32_t)page;
+}
+
+// Copies the region on the GPU: bind a scratch target, draw the source region
+// into it, switch back (which resolves it), then keep its texture as a page.
+// shortcut: removeback, smooth and sprite_delete of these sprites are ignored.
+static int32_t d3d9CreateSpriteFromSurfaceModern(Renderer* renderer, int32_t surfaceID,
+                                                  int32_t x, int32_t y, int32_t w, int32_t h,
+                                                  bool removeback, bool smooth,
+                                                  int32_t xorig, int32_t yorig) {
+    (void)removeback; (void)smooth;
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    DataWin* dw = renderer->dataWin;
+    if (w <= 0 || h <= 0 || !dw || !d3d9Surface(dr, surfaceID)) return -1;
+    int32_t prev = dr->boundTarget;
+    int32_t tmp = d3d9CreateSurface(renderer, w, h);
+    if (tmp < 0) return -1;
+    if (!d3d9BindTarget(dr, tmp)) { // leaving the source here resolves its latest drawing
+        d3d9ReleaseSurfaceObjects(dr, d3d9Surface(dr, tmp));
+        return -1;
+    }
+    D3D9Surface* src = d3d9Surface(dr, surfaceID);
+    d3d9BlitTexture(dr, src->tex, src->allocW, src->allocH, x, y, w, h, 0.0f, 0.0f);
+    d3d9BindTarget(dr, prev);
+    D3D9Surface* s = d3d9Surface(dr, tmp);
+    int32_t page = d3d9AddPage(dr, s->tex, s->allocW, s->allocH);
+    if (page < 0) {
+        d3d9ReleaseSurfaceObjects(dr, s);
+        return -1;
+    }
+    ((IDirect3DSurface9*)s->rt)->Release(); // the page owns the texture now
+    memset(s, 0, sizeof(*s));
+
+    uint32_t t = dw->tpag.count;
+    for (uint32_t i = dr->originalTpagCount; i < dw->tpag.count; i++)
+        if (dw->tpag.items[i].texturePageId == -1) { t = i; break; }
+    if (t == dw->tpag.count) {
+        TexturePageItem* items = (TexturePageItem*)realloc(dw->tpag.items, (t + 1) * sizeof(TexturePageItem));
+        if (!items) return -1;
+        dw->tpag.items = items;
+        dw->tpag.count++;
+    }
+    TexturePageItem* tpag = &dw->tpag.items[t];
+    memset(tpag, 0, sizeof(*tpag));
+    tpag->sourceWidth = tpag->targetWidth = tpag->boundingWidth = (uint16_t)w;
+    tpag->sourceHeight = tpag->targetHeight = tpag->boundingHeight = (uint16_t)h;
+    tpag->texturePageId = (int16_t)page;
+
+    uint32_t si = dw->sprt.count;
+    for (uint32_t i = dr->originalSpriteCount; i < dw->sprt.count; i++)
+        if (dw->sprt.sprites[i].textureCount == 0) { si = i; break; }
+    if (si == dw->sprt.count) {
+        Sprite* sprites = (Sprite*)realloc(dw->sprt.sprites, (si + 1) * sizeof(Sprite));
+        if (!sprites) return -1;
+        dw->sprt.sprites = sprites;
+        dw->sprt.count++;
+    }
+    Sprite* sprite = &dw->sprt.sprites[si];
+    memset(sprite, 0, sizeof(*sprite));
+    int32_t* tpags = (int32_t*)malloc(sizeof(int32_t));
+    if (!tpags) return -1;
+    tpags[0] = (int32_t)t;
+    sprite->name = "dynamic_sprite";
+    sprite->width = (uint32_t)w;
+    sprite->height = (uint32_t)h;
+    sprite->originX = xorig;
+    sprite->originY = yorig;
+    sprite->textureCount = 1;
+    sprite->tpagIndices = tpags;
+    return (int32_t)si;
 }
 
 static void d3d9DeleteSprite(Renderer* renderer, int32_t spriteIndex) {
@@ -1277,16 +1363,6 @@ static void d3d9DeleteSprite(Renderer* renderer, int32_t spriteIndex) {
     // TODO: implement dynamic sprite deletion
 }
 
-// Modern RendererVtable includes surfaceID; keep the legacy helper's narrower
-// signature behind an exact-contract adapter.
-static int32_t d3d9CreateSpriteFromSurfaceModern(Renderer* renderer, int32_t surfaceID,
-                                                  int32_t x, int32_t y, int32_t w, int32_t h,
-                                                  bool removeback, bool smooth,
-                                                  int32_t xorig, int32_t yorig) {
-    (void)surfaceID;
-    return d3d9CreateSpriteFromSurface(renderer, x, y, w, h,
-                                       removeback, smooth, xorig, yorig);
-}
 
 // ===[ Modern renderer-contract adapters ]===
 
@@ -1609,6 +1685,62 @@ static void d3d9PrimitiveEnd(Renderer* renderer) {
     dr->primitiveVertexCount = 0;
     dr->primitiveTexture = 0;
     dr->currentTextureIndex = -1;
+}
+
+// vertex_submit: decode the buffer on the CPU into the primitive path (positions go
+// through screenTransform like every other draw). Lists are drawn in chunks.
+static void d3d9DrawVertexBuffer(Renderer* renderer, VertexBuffer* vb, int32_t primitive,
+                                 int32_t texture, int32_t offset, int32_t count) {
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    if (!vb || !vb->data || !vb->format || vb->vertexSize == 0 || !dr->primitiveVertexCapacity) return;
+    const VertexFormat* f = vb->format;
+    int32_t pos = -1, col = -1, uv = -1;
+    for (int32_t e = 0; e < (int32_t)f->numElements; e++) {
+        const VertexElement* el = &f->elements[e];
+        if (el->usage == VERTEX_USAGE_POSITION && pos < 0) pos = e;
+        else if (el->usage == VERTEX_USAGE_COLOR && col < 0) col = e;
+        else if (el->usage == VERTEX_USAGE_TEXCOORD && uv < 0) uv = e;
+    }
+    if (pos < 0) return;
+    int32_t total = (int32_t)(vb->size / vb->vertexSize);
+    if (offset < 0) offset = 0;
+    if (count < 0 || offset + count > total) count = total - offset;
+    if (count <= 0) return;
+
+    // Lists split cleanly at multiples of 6; strips and fans cannot be split.
+    // shortcut: strips/fans beyond D3D9_MAX_PRIMITIVE_VERTICES are truncated.
+    bool splittable = primitive == PRIMITIVE_POINTS || primitive == PRIMITIVE_LINES ||
+                      primitive == PRIMITIVE_TRIANGLES;
+    int32_t chunk = (int32_t)(dr->primitiveVertexCapacity / 6u * 6u);
+    if (!splittable && count > chunk) count = chunk;
+
+    while (count > 0) {
+        int32_t n = count < chunk ? count : chunk;
+        flushBatch(dr);
+        SpriteVertex* out = (SpriteVertex*)dr->primitiveVertexData;
+        for (int32_t i = 0; i < n; i++) {
+            const uint8_t* v = vb->data + (size_t)(offset + i) * vb->vertexSize;
+            const float* p = (const float*)(v + f->elements[pos].offset);
+            float sx, sy, u = 0.0f, t = 0.0f, r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
+            transformPoint(dr, p[0], f->elements[pos].type == VERTEX_TYPE_FLOAT1 ? 0.0f : p[1], &sx, &sy);
+            if (uv >= 0) {
+                const float* q = (const float*)(v + f->elements[uv].offset);
+                u = q[0]; t = q[1];
+            }
+            if (col >= 0) { // vertex_colour stores a native uint32: BGR | alpha << 24
+                uint32_t c = *(const uint32_t*)(v + f->elements[col].offset);
+                bgrToFloatColor(c & 0xFFFFFFu, (float)(c >> 24) / 255.0f, &r, &g, &b, &a);
+            }
+            setVertex(&out[i], sx, sy, u, t, r, g, b, a);
+        }
+        dr->primitiveVertexCount = (uint32_t)n;
+        dr->primitiveType = primitive;
+        dr->primitiveTexture = texture < 0 ? 0 : texture;
+        dr->primitiveActive = true;
+        d3d9PrimitiveEnd(renderer);
+        offset += n;
+        count -= n;
+    }
 }
 
 // ===[ Surfaces ]===
@@ -2236,6 +2368,7 @@ static void d3d9InitializeRendererVtable(void) {
     d3d9RendererVtable.flush = d3d9Flush;
     d3d9RendererVtable.clearScreen = d3d9ClearScreen;
     d3d9RendererVtable.createSpriteFromSurface = d3d9CreateSpriteFromSurfaceModern;
+    d3d9RendererVtable.drawVertexBuffer = d3d9DrawVertexBuffer;
     d3d9RendererVtable.deleteSprite = d3d9DeleteSprite;
     d3d9RendererVtable.gpuGetBlendFactors = d3d9GpuGetBlendFactors;
     d3d9RendererVtable.gpuGetBlendMode = d3d9GpuGetBlendMode;
