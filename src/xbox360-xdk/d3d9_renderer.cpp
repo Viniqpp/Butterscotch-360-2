@@ -259,10 +259,10 @@ static void d3d9ApplyGuiCamera(D3D9Renderer* dr, int32_t guiW, int32_t guiH) {
 
 // ===[ Vtable Implementations ]===
 
-// Frees least-recently-used pages not drawn this frame until `bytes` fit.
-static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes) {
+// Frees least-recently-used pages not drawn this frame until `bytes` fit under `limit`.
+static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes, uint32_t limit) {
     bool idled = false;
-    while (dr->textureBytesAllocated + bytes > dr->maxTextureBytes) {
+    while (dr->textureBytesAllocated + bytes > limit) {
         int32_t victim = -1;
         for (uint32_t p = 0; p < dr->textureCount; p++)
             if (dr->textures[p] && dr->pageLastUse[p] != dr->frameCounter &&
@@ -299,7 +299,7 @@ static IDirect3DTexture9* d3d9CreateDxtTexture(D3D9Renderer* dr, uint32_t page, 
             words[(size_t)y * w + x] = word;
         }
     }
-    if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h)) {
+    if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h, dr->maxTextureBytes)) {
         logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
                 page, dr->textureBytesAllocated >> 20);
         return NULL;
@@ -350,7 +350,14 @@ static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
         dr->textureWidths[i] = w;
         dr->textureHeights[i] = h;
 
-        if (dr->compressTextures && w % 4 == 0 && h % 4 == 0) {
+        // DXT is lossy and slow to encode, so by default pages stay full quality
+        // while they fit in 3/4 of the budget; only frames that need more (e.g.
+        // Deltarune Ch5 battles) get compressed pages. "compressTextures": true
+        // compresses everything.
+        bool compress = w % 4 == 0 && h % 4 == 0 &&
+            (dr->compressTextures ||
+             !d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h * 4u, dr->maxTextureBytes / 4 * 3));
+        if (compress) {
             uint32_t bytes = 0;
             IDirect3DTexture9* compressed = d3d9CreateDxtTexture(dr, i, pixels, w, h, &bytes);
             free(pixels);
@@ -368,7 +375,7 @@ static bool d3d9LoadPage(D3D9Renderer* dr, uint32_t i) {
 
         // Xbox 360 textures are uploaded through a linear surface. Keep a
         // strict aggregate budget so malformed WADs cannot exhaust unified RAM.
-        if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h * 4u)) {
+        if (!d3d9MakeRoom(dr, (uint32_t)w * (uint32_t)h * 4u, dr->maxTextureBytes)) {
             logWarn("D3D9: no room for texture page %u (%u MB in use, all drawn this frame)\n",
                     i, dr->textureBytesAllocated >> 20);
             free(pixels);
@@ -2283,7 +2290,7 @@ Renderer* D3D9Renderer_create(void* pd3dDevice) {
     dr->base.drawAlpha = 1.0f;
     dr->base.drawFont = -1;
     dr->appSurface = -1;
-    dr->compressTextures = true;
+    dr->compressTextures = false; // compress only under memory pressure
     dr->boundTarget = -1;
     dr->pd3dDevice = pd3dDevice;
     dr->currentTextureIndex = -1;
