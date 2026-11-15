@@ -284,19 +284,57 @@ static void d3d9ApplyGuiCamera(D3D9Renderer* dr, int32_t guiW, int32_t guiH) {
 
 // ===[ Vtable Implementations ]===
 
-// Frees least-recently-used pages not drawn this frame until `bytes` fit under `limit`.
+// Re-encodes a resident full-colour page as DXT5 in place (a quarter of the memory).
+// Used when every page in memory is needed by the current scene.
+static bool d3d9SqueezePage(D3D9Renderer* dr, uint32_t p) {
+    int w = dr->textureWidths[p], h = dr->textureHeights[p];
+    IDirect3DTexture9* old = (IDirect3DTexture9*)dr->textures[p];
+    IDirect3DTexture9* tex = NULL;
+    D3DLOCKED_RECT src, dst;
+    if (w % 4 || h % 4 ||
+        FAILED(Dev(dr)->CreateTexture(w, h, 1, 0, D3DFMT_LIN_DXT5, D3DPOOL_DEFAULT, &tex, NULL)) || !tex)
+        return false;
+    bool ok = false;
+    if (SUCCEEDED(old->LockRect(0, &src, NULL, D3DLOCK_READONLY))) {
+        if (SUCCEEDED(tex->LockRect(0, &dst, NULL, 0))) {
+            ok = SUCCEEDED(XGCompressSurface(dst.pBits, dst.Pitch, w, h, D3DFMT_LIN_DXT5, NULL,
+                                             src.pBits, src.Pitch, D3DFMT_LIN_A8R8G8B8, NULL, 0, 0.0f));
+            tex->UnlockRect(0);
+        }
+        old->UnlockRect(0);
+    }
+    if (!ok) { tex->Release(); return false; }
+    old->Release(); // caller already waited for the GPU
+    dr->textures[p] = tex;
+    dr->textureBytesAllocated -= dr->pageBytes[p];
+    dr->pageBytes[p] = (uint32_t)dst.Pitch * (uint32_t)(h / 4);
+    dr->textureBytesAllocated += dr->pageBytes[p];
+    return true;
+}
+
+// Frees least-recently-used pages not drawn this frame until `bytes` fit under `limit`;
+// when every page is in use, compresses full-colour ones in place instead.
 static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes, uint32_t limit) {
     bool idled = false;
     while (dr->textureBytesAllocated + bytes > limit) {
-        int32_t victim = -1;
-        for (uint32_t p = 0; p < dr->originalTexturePageCount; p++)
-            if (dr->textures[p] && dr->pageLastUse[p] != dr->frameCounter &&
+        int32_t victim = -1, squeeze = -1;
+        for (uint32_t p = 0; p < dr->originalTexturePageCount; p++) {
+            if (!dr->textures[p]) continue;
+            if (dr->pageLastUse[p] != dr->frameCounter &&
                 (victim < 0 || dr->pageLastUse[p] < dr->pageLastUse[victim])) victim = (int32_t)p;
-        if (victim < 0) return false;
+            if (dr->pageBytes[p] >= (uint32_t)dr->textureWidths[p] * (uint32_t)dr->textureHeights[p] * 4u &&
+                (squeeze < 0 || dr->pageBytes[p] > dr->pageBytes[squeeze])) squeeze = (int32_t)p;
+        }
+        if (victim < 0 && squeeze < 0) return false;
         if (!idled) { // Xenon does not track resource lifetime: let the GPU finish first
             flushBatch(dr);
             Dev(dr)->BlockUntilIdle();
             idled = true;
+        }
+        if (victim < 0) {
+            if (!d3d9SqueezePage(dr, (uint32_t)squeeze)) return false;
+            logInfo("D3D9: compressed resident page %d to make room\n", squeeze);
+            continue;
         }
         ((IDirect3DTexture9*)dr->textures[victim])->Release();
         dr->textures[victim] = NULL;
@@ -429,7 +467,8 @@ static bool d3d9WantDxt(D3D9Renderer* dr, Texture* t) {
     uint32_t pinned = 0;
     for (uint32_t p = 0; p < dr->originalTexturePageCount; p++)
         if (dr->textures[p] && dr->pageLastUse[p] + 1 >= dr->frameCounter) pinned += dr->pageBytes[p];
-    return pinned + (uint32_t)t->textureWidth * (uint32_t)t->textureHeight * 4u > dr->maxTextureBytes;
+    // 3/4: the last quarter stays free for compressed pages once a scene outgrows the budget.
+    return pinned + (uint32_t)t->textureWidth * (uint32_t)t->textureHeight * 4u > dr->maxTextureBytes / 4 * 3;
 }
 
 // Synchronous load, used when no worker threads could be started.
