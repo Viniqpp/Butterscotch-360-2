@@ -1553,8 +1553,14 @@ static bool d3d9CreateSurfaceObjects(D3D9Renderer* dr, D3D9Surface* s, int32_t w
     IDirect3DSurface9* rt = NULL;
     // shortcut: targets larger than EDRAM (10 MB) fail here; predicated tiling would lift that.
     HRESULT hr = dev->CreateTexture((UINT)allocW, (UINT)allocH, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, NULL);
-    if (SUCCEEDED(hr) && tex)
-        hr = dev->CreateRenderTarget((UINT)allocW, (UINT)allocH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &rt, NULL);
+    if (SUCCEEDED(hr) && tex) {
+        // All targets share EDRAM from tile 0: only one is bound at a time and
+        // d3d9BindTarget resolves it out before switching. Without this, D3D gives
+        // each its own EDRAM slice and creation fails once the 10 MB is used.
+        D3DSURFACE_PARAMETERS edram;
+        memset(&edram, 0, sizeof(edram));
+        hr = dev->CreateRenderTarget((UINT)allocW, (UINT)allocH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &rt, &edram);
+    }
     if (FAILED(hr) || !tex || !rt) {
         logWarn("D3D9: surface %dx%d unavailable (hr=0x%08X)\n", w, h, (unsigned)hr);
         if (tex) tex->Release();
