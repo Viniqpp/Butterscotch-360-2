@@ -258,6 +258,44 @@ static void shutdownXdk(Runner* runner, VMContext* vm, Renderer* renderer,
 
 void XdkBuiltins_register(VMContext* vm); // xdk_builtins.cpp
 
+// game:\INPUT.TXT: scripted pad input for unattended tests. One press per line,
+// "<game step> <steps held> <BUTTON>[+BUTTON...]", e.g. "600 6 A" or "640 4 DOWN".
+typedef struct { uint32_t start, length; WORD mask; } XdkScriptedPress;
+static XdkScriptedPress g_inputScript[512];
+static int g_inputScriptCount;
+static uint32_t g_scriptStep; // game steps run so far
+
+static void xdkLoadInputScript(void) {
+    FILE* f = fopen("game:\\INPUT.TXT", "rb");
+    if (!f) return;
+    static const struct { const char* name; WORD mask; } names[] = {
+        { "A", XINPUT_GAMEPAD_A }, { "B", XINPUT_GAMEPAD_B }, { "X", XINPUT_GAMEPAD_X },
+        { "Y", XINPUT_GAMEPAD_Y }, { "START", XINPUT_GAMEPAD_START }, { "BACK", XINPUT_GAMEPAD_BACK },
+        { "UP", XINPUT_GAMEPAD_DPAD_UP }, { "DOWN", XINPUT_GAMEPAD_DPAD_DOWN },
+        { "LEFT", XINPUT_GAMEPAD_DPAD_LEFT }, { "RIGHT", XINPUT_GAMEPAD_DPAD_RIGHT },
+    };
+    char line[128], buttons[96];
+    unsigned start, length;
+    while (g_inputScriptCount < 512 && fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%u %u %95s", &start, &length, buttons) != 3) continue;
+        WORD mask = 0;
+        for (char* b = strtok(buttons, "+"); b; b = strtok(NULL, "+"))
+            for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++)
+                if (!strcmp(b, names[k].name)) mask |= names[k].mask;
+        XdkScriptedPress press = { start, length, mask };
+        g_inputScript[g_inputScriptCount++] = press;
+    }
+    fclose(f);
+    xdkLog("BS: INPUT.TXT: %d scripted presses\n", g_inputScriptCount);
+}
+
+static WORD xdkScriptedButtons(uint32_t step) {
+    WORD mask = 0;
+    for (int i = 0; i < g_inputScriptCount; i++)
+        if (step - g_inputScript[i].start < g_inputScript[i].length) mask |= g_inputScript[i].mask;
+    return mask;
+}
+
 // ===[ Main Entry Point ]===
 
 VOID __cdecl main() {
@@ -356,6 +394,7 @@ VOID __cdecl main() {
         }
     }
 
+    xdkLoadInputScript();
     xdkLog("BS: searching for data.win\n");
     char msg[256];
     for (int i = 0; !dataWinPath && searchPaths[i]; i++) {
@@ -607,6 +646,11 @@ VOID __cdecl main() {
         memset(&state, 0, sizeof(state));
         WORD buttons = 0;
         bool controllerConnected = XInputGetState(0, &state) == ERROR_SUCCESS;
+        WORD scripted = g_inputScriptCount ? xdkScriptedButtons(g_scriptStep) : 0;
+        if (scripted) { // INPUT.TXT: as if pressed on the pad (keyboard mapping and gamepad both see it)
+            state.Gamepad.wButtons |= scripted;
+            controllerConnected = true;
+        }
         if (controllerConnected) {
             buttons = state.Gamepad.wButtons;
 
@@ -648,6 +692,7 @@ VOID __cdecl main() {
         double perfT0 = _xdk_monotonic_ms();
         while (accumulator >= targetFrameTime && !runner->shouldExit) {
             if (gameFramesRan > 0) RunnerKeyboard_beginFrame(runner->keyboard);
+            g_scriptStep++;
             updateNativeGamepad(runner, &state.Gamepad, controllerConnected);
             // delta_time (microseconds): fixed step, so time-driven code (e.g. Deltarune
             // Ch5's music-synced pillars/lyrics) advances in step with the game.
@@ -692,10 +737,11 @@ VOID __cdecl main() {
             if (++perfFrames == 60) {
                 MEMORYSTATUS mem;
                 GlobalMemoryStatus(&mem);
-                xdkLog("BS perf: per frame step=%.1fms (%d steps) draw=%.1fms present=%.1fms free=%uMB textures=%uMB\n",
+                xdkLog("BS perf: per frame step=%.1fms (%d steps) draw=%.1fms present=%.1fms free=%uMB textures=%uMB steps=%u room=%s\n",
                        perfStepMs / 60.0, perfSteps, perfDrawMs / 60.0, perfPresentMs / 60.0,
                        (unsigned)(mem.dwAvailPhys / (1024 * 1024)),
-                       ((D3D9Renderer*)renderer)->textureBytesAllocated >> 20);
+                       ((D3D9Renderer*)renderer)->textureBytesAllocated >> 20, (unsigned)g_scriptStep,
+                       runner->currentRoom ? runner->currentRoom->name : "?");
                 perfStepMs = perfDrawMs = perfPresentMs = 0.0;
                 perfFrames = perfSteps = 0;
             }

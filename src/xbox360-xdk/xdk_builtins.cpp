@@ -97,4 +97,12 @@ void XdkBuiltins_register(VMContext* vm) {
     reg(vm, "audio_start_recording", (BuiltinFunc)bi_minus_one);
     reg(vm, "audio_stop_recording", (BuiltinFunc)bi_undefined);
     reg(vm, "gif_open", (BuiltinFunc)bi_minus_one);
+
+    // VM_create already resolved every call site; point the ones it left unresolved at the
+    // functions registered above.
+    for (uint32_t i = 0; i < vm->funcCallCacheCount; i++) {
+        FuncCallCache* c = &vm->funcCallCache[i];
+        if (!c->builtin && c->scriptCodeIndex < 0)
+            c->builtin = (void*)VM_findBuiltin(vm, vm->dataWin->func.functions[i].name);
+    }
 }
