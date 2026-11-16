@@ -2491,6 +2491,16 @@ static void d3d9GpuSetShader(Renderer* r, int32_t i) {
     IDirect3DPixelShader9* ps = i >= 0 && (uint32_t)i < dr->userShaderCount
         ? (IDirect3DPixelShader9*)dr->userPixelShaders[i] : NULL;
     Dev(dr)->SetPixelShader(ps ? ps : (IDirect3DPixelShader9*)dr->pPixelShader);
+    // GameMaker fills these built-in uniforms of every shader; unset, they keep whatever an
+    // earlier shader left in the registers (Deltarune Ch5's palette swap then clipped every pixel).
+    ID3DXConstantTable* t = ps ? d3d9ShaderTable(dr, i) : NULL;
+    if (t) {
+        D3DXHANDLE h;
+        if ((h = t->GetConstantByName(NULL, "gm_AlphaTestEnabled")) != NULL) t->SetBool(Dev(dr), h, FALSE);
+        if ((h = t->GetConstantByName(NULL, "gm_AlphaRefValue")) != NULL) t->SetFloat(Dev(dr), h, 0.0f);
+        if ((h = t->GetConstantByName(NULL, "gm_PS_FogEnabled")) != NULL) t->SetBool(Dev(dr), h, dr->fog[3] > 0.0f);
+        if ((h = t->GetConstantByName(NULL, "gm_FogColour")) != NULL) t->SetFloatArray(Dev(dr), h, dr->fog, 4);
+    }
 }
 static void d3d9GpuResetShader(Renderer* r) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
