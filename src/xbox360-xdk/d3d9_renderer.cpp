@@ -286,6 +286,13 @@ static void d3d9ApplyGuiCamera(D3D9Renderer* dr, int32_t guiW, int32_t guiH) {
 
 // ===[ Vtable Implementations ]===
 
+// Xbox 360 D3D does not hold a reference for textures set on a sampler stage: a texture
+// released while still bound leaves the device pointing at freed memory (heap
+// corruption on the next SetTexture). Clear the stages before any Release.
+static void d3d9UnbindTextures(D3D9Renderer* dr) {
+    for (DWORD stage = 0; stage < 4; stage++) Dev(dr)->SetTexture(stage, NULL);
+    dr->currentTextureIndex = -1; // the next batch rebinds its texture
+}
 // Re-encodes a resident full-colour page as DXT5 in place (a quarter of the memory).
 // Used when every page in memory is needed by the current scene.
 static bool d3d9SqueezePage(D3D9Renderer* dr, uint32_t p) {
@@ -306,6 +313,7 @@ static bool d3d9SqueezePage(D3D9Renderer* dr, uint32_t p) {
         old->UnlockRect(0);
     }
     if (!ok) { tex->Release(); return false; }
+    d3d9UnbindTextures(dr);
     old->Release(); // caller already waited for the GPU
     dr->textures[p] = tex;
     dr->textureBytesAllocated -= dr->pageBytes[p];
@@ -338,6 +346,7 @@ static bool d3d9MakeRoom(D3D9Renderer* dr, uint32_t bytes, uint32_t limit) {
             logInfo("D3D9: compressed resident page %d to make room\n", squeeze);
             continue;
         }
+        d3d9UnbindTextures(dr);
         ((IDirect3DTexture9*)dr->textures[victim])->Release();
         dr->textures[victim] = NULL;
         dr->textureBytesAllocated -= dr->pageBytes[victim];
@@ -2183,6 +2192,7 @@ static void d3d9ReleaseSurfaceObjects(D3D9Renderer* dr, D3D9Surface* s) {
             Dev(dr)->BlockUntilIdle();
         }
         if (s->rt) ((IDirect3DSurface9*)s->rt)->Release();
+        d3d9UnbindTextures(dr);
         if (s->tex) ((IDirect3DTexture9*)s->tex)->Release();
     }
     memset(s, 0, sizeof(*s));
