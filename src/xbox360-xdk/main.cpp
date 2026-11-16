@@ -334,6 +334,12 @@ static const char* volatile g_lastBuiltin; // for the crash report below
 static void xdkBuiltinHeapHook(VMContext* ctx, const char* name, bool before) {
     if (before) g_lastBuiltin = name;
     if (g_heapReported || !g_heapCheckRoom[0]) return;
+    if (before && strstr(name, "free") || before && strstr(name, "destroy") || before && strstr(name, "delete") ||
+        before && strstr(name, "clear") || before && strstr(name, "surface") || before && !strncmp(name, "ds_", 3)) {
+        Runner* r = ctx->runner; // log memory-releasing calls in the checked room: the last one before a crash is the suspect
+        if (r && r->currentRoom && r->currentRoom->name && !strcmp(r->currentRoom->name, g_heapCheckRoom))
+            xdkLog("BS: call %s in %s\n", name, VM_getCurrentCallFrameCodeName(ctx));
+    }
     Runner* runner = ctx->runner;
     if (!runner || !runner->currentRoom || !runner->currentRoom->name ||
         strcmp(runner->currentRoom->name, g_heapCheckRoom)) return;

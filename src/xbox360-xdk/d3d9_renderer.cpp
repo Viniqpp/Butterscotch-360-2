@@ -2278,7 +2278,17 @@ static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h) {
     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return -1;
     D3D9Surface* s = (D3D9Surface*)dr->surfaces;
     int32_t id = 0;
-    while (id < (int32_t)arrlen(s) && s[id].exists) id++;
+    // Hand out ids round-robin: GML code keeps stale ids of freed surfaces and later
+    // calls surface_exists/surface_free on them, so an id reused at once ends up freeing
+    // another object's surface (Deltarune Ch5 Floradinn fight crash).
+    static int32_t cursor = 1;
+    int32_t n = (int32_t)arrlen(s);
+    id = n;
+    for (int32_t k = 0; k < n && n >= 256; k++) { // below 256 slots, always append
+        int32_t c = (cursor + k) % n;
+        if (c != 0 && !s[c].exists) { id = c; break; }
+    }
+    cursor = id + 1;
     if (id == (int32_t)arrlen(s)) {
         D3D9Surface blank;
         memset(&blank, 0, sizeof(blank));
