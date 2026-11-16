@@ -1,4 +1,7 @@
 #include "vm.h"
+#ifdef _XBOX
+void (*g_vmBuiltinHook)(VMContext* ctx, const char* name, bool before);
+#endif
 #include "vm_builtins.h"
 #include "instance.h"
 #include "runner.h"
@@ -2007,7 +2010,14 @@ static void handleCall(VMContext* ctx, OpWord opword, const uint8_t* extraData) 
     // Fast path: cached builtin function pointer
     if (cache->builtin != nullptr) {
         BuiltinFunc builtin = (BuiltinFunc) cache->builtin;
+#ifdef _XBOX
+        // Debug hook (Xbox 360 build, CONFIG.JSN heapCheck): validates the heap around each builtin.
+        if (g_vmBuiltinHook) g_vmBuiltinHook(ctx, ctx->dataWin->func.functions[funcIndex].name, true);
+#endif
         RValue result = builtin(ctx, args, argCount);
+#ifdef _XBOX
+        if (g_vmBuiltinHook) g_vmBuiltinHook(ctx, ctx->dataWin->func.functions[funcIndex].name, false);
+#endif
         // Free arguments
         if (args != nullptr) {
             repeat(argCount, i) {

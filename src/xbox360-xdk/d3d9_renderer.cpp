@@ -2005,7 +2005,7 @@ static void d3d9DrawVertex(Renderer* renderer, float x, float y, float z,
     transformPoint(dr, x, y, &sx, &sy);
     bgrToFloatColor(color, alpha, &cr, &cg, &cb, &ca);
     setVertex(vertex, sx, sy, u, v, cr, cg, cb, ca);
-    vertex->z = z;
+    (void)z; // no depth buffer: a raw GML depth outside 0..1 would be clipped by the GPU
 }
 
 static void d3d9PrimitiveEnd(Renderer* renderer) {

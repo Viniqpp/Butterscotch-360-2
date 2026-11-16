@@ -327,6 +327,21 @@ static void xdkHeapCheck(const char* phase, Runner* runner) {
            runner && runner->currentRoom ? runner->currentRoom->name : "?");
 }
 
+// With "heapCheckRoom", the heap is also validated around every builtin call while
+// that room is current, naming the first call that leaves it damaged.
+static char g_heapCheckRoom[64];
+static void xdkBuiltinHeapHook(VMContext* ctx, const char* name, bool before) {
+    if (g_heapReported) return;
+    Runner* runner = ctx->runner;
+    if (!runner || !runner->currentRoom || !runner->currentRoom->name ||
+        strcmp(runner->currentRoom->name, g_heapCheckRoom)) return;
+    int status = _heapchk();
+    if (status == _HEAPOK || status == _HEAPEMPTY) return;
+    g_heapReported = true;
+    xdkLog("BS: HEAP CORRUPTED %s builtin %s, in %s (status %d) at step %u\n", before ? "before" : "after",
+           name, VM_getCurrentCallFrameCodeName(ctx), status, g_scriptStep);
+}
+
 static WORD xdkScriptedButtons(uint32_t step) {
     WORD mask = 0;
     for (int i = 0; i < g_inputScriptCount; i++)
@@ -553,6 +568,11 @@ VOID __cdecl main() {
             ((D3D9Renderer*)renderer)->compressTextures = JsonReader_getBool(compress);
         JsonValue* heap = JsonReader_getJsonValueByKey(configRoot, "heapCheck");
         if (heap && JsonReader_isBool(heap)) g_heapCheck = JsonReader_getBool(heap);
+        JsonValue* heapRoom = JsonReader_getJsonValueByKey(configRoot, "heapCheckRoom");
+        if (heapRoom && JsonReader_getString(heapRoom)) {
+            strncpy(g_heapCheckRoom, JsonReader_getString(heapRoom), sizeof(g_heapCheckRoom) - 1);
+            g_vmBuiltinHook = xdkBuiltinHeapHook;
+        }
         JsonValue* trace = JsonReader_getJsonValueByKey(configRoot, "traceSurfaces");
         if (trace && JsonReader_isNumber(trace)) g_d3d9TraceSurfaces = (int)JsonReader_getDouble(trace);
         JsonValue* traceRoom = JsonReader_getJsonValueByKey(configRoot, "traceRoom");

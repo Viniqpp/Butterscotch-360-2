@@ -284,6 +284,9 @@ void VM_disassemble(VMContext* ctx, int32_t codeIndex);
 void VM_printOpcodeProfilerReport(const VMContext* ctx);
 #endif
 void VM_registerBuiltin(VMContext* ctx, const char* name, BuiltinFunc func);
+#ifdef _XBOX
+extern void (*g_vmBuiltinHook)(VMContext* ctx, const char* name, bool before);
+#endif
 #if defined(_MSC_VER) && !defined(__clang__)
 // Some versions of MSVC complain that the functions aren't the right type because of struct bullshit.
 // We guard this behind _MSC_VER to keep type checking on other compilers to find legitimate type mismatch errors.
