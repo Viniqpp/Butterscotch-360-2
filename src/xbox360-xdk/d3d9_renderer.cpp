@@ -1172,7 +1172,7 @@ static void d3d9DrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float
     // Build 4 corners
     float cx[4], cy[4];
     if (angleDeg != 0.0f) {
-        float rad = angleDeg * (3.14159265f / 180.0f);
+        float rad = -angleDeg * (3.14159265f / 180.0f); // GameMaker angles turn counter-clockwise on a y-down screen
         float cosA = cosf(rad);
         float sinA = sinf(rad);
 
@@ -1277,7 +1277,7 @@ static void d3d9DrawSpritePartModern(Renderer* renderer, int32_t tpagIndex,
 
     float px[4] = { x, x + srcW * xscale, x + srcW * xscale, x };
     float py[4] = { y, y, y + srcH * yscale, y + srcH * yscale };
-    float rad = angleDeg * (3.14159265f / 180.0f);
+    float rad = -angleDeg * (3.14159265f / 180.0f);
     float cs = cosf(rad), sn = sinf(rad);
     SpriteVertex* v = allocQuad(dr);
     float cr, cg, cb, ca;
@@ -1326,7 +1326,7 @@ static void d3d9DrawSpritePartColorModern(Renderer* renderer, int32_t tpagIndex,
     float px[4] = { x, x + srcW * xscale, x + srcW * xscale, x };
     float py[4] = { y, y, y + srcH * yscale, y + srcH * yscale };
     uint32_t colors[4] = { c1, c2, c3, c4 };
-    float rad = angleDeg * (3.14159265f / 180.0f);
+    float rad = -angleDeg * (3.14159265f / 180.0f);
     float cs = cosf(rad), sn = sinf(rad);
     SpriteVertex* v = allocQuad(dr);
     for (int i = 0; i < 4; i++) {
@@ -1946,7 +1946,7 @@ static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, i
     if (sw <= 0 || sh <= 0) return;
     float px[4] = { 0.0f, sw * xs, sw * xs, 0.0f };
     float py[4] = { 0.0f, 0.0f, sh * ys, sh * ys };
-    float rad = angle * (3.14159265f / 180.0f), cs = cosf(rad), sn = sinf(rad);
+    float rad = -angle * (3.14159265f / 180.0f), cs = cosf(rad), sn = sinf(rad);
     float sx[4], sy[4];
     for (int i = 0; i < 4; i++) // rotate about (x, y) like the sprite paths
         transformPoint(dr, x + px[i] * cs - py[i] * sn, y + px[i] * sn + py[i] * cs, &sx[i], &sy[i]);
@@ -2832,6 +2832,7 @@ Renderer* D3D9Renderer_create(void* pd3dDevice) {
     dr->base.drawFont = -1;
     dr->appSurface = -1;
     dr->compressTextures = false; // compress only under memory pressure
+    dr->base.circlePrecision = 24; // GameMaker default; unset it clamps to 4 and circles draw as diamonds
     dr->boundTarget = -1;
     dr->pd3dDevice = pd3dDevice;
     dr->currentTextureIndex = -1;

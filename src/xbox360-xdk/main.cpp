@@ -12,6 +12,7 @@
 #include "runner.h"
 #include "runner_keyboard.h"
 #include "runner_gamepad.h"
+#include <malloc.h>
 #include "vm.h"
 #include "data_win.h"
 #include "json_reader.h"
@@ -313,6 +314,19 @@ static DWORD WINAPI xdkWatchdog(LPVOID) {
     }
 }
 
+// CONFIG.JSN "heapCheck": true validates the heap after every step and draw and logs
+// the first phase that finds it damaged (slow; for tracking memory corruption).
+static bool g_heapCheck;
+static bool g_heapReported;
+static void xdkHeapCheck(const char* phase, Runner* runner) {
+    if (!g_heapCheck || g_heapReported) return;
+    int status = _heapchk();
+    if (status == _HEAPOK || status == _HEAPEMPTY) return;
+    g_heapReported = true;
+    xdkLog("BS: HEAP CORRUPTED after %s (status %d) at step %u, room %s\n", phase, status, g_scriptStep,
+           runner && runner->currentRoom ? runner->currentRoom->name : "?");
+}
+
 static WORD xdkScriptedButtons(uint32_t step) {
     WORD mask = 0;
     for (int i = 0; i < g_inputScriptCount; i++)
@@ -537,6 +551,8 @@ VOID __cdecl main() {
         JsonValue* compress = JsonReader_getJsonValueByKey(configRoot, "compressTextures");
         if (compress && JsonReader_isBool(compress))
             ((D3D9Renderer*)renderer)->compressTextures = JsonReader_getBool(compress);
+        JsonValue* heap = JsonReader_getJsonValueByKey(configRoot, "heapCheck");
+        if (heap && JsonReader_isBool(heap)) g_heapCheck = JsonReader_getBool(heap);
         JsonValue* trace = JsonReader_getJsonValueByKey(configRoot, "traceSurfaces");
         if (trace && JsonReader_isNumber(trace)) g_d3d9TraceSurfaces = (int)JsonReader_getDouble(trace);
         JsonValue* traceRoom = JsonReader_getJsonValueByKey(configRoot, "traceRoom");
@@ -733,6 +749,7 @@ VOID __cdecl main() {
             // Ch5's music-synced pillars/lyrics) advances in step with the game.
             runner->deltaTime = (GMLReal)(targetFrameTime * 1000000.0);
             Runner_step(runner);
+            xdkHeapCheck("Runner_step", runner);
             accumulator -= targetFrameTime;
             gameFramesRan++;
         }
@@ -767,6 +784,7 @@ VOID __cdecl main() {
             platformSwapBuffers((D3D9Renderer*)renderer);
             double perfT3 = _xdk_monotonic_ms();
             perfDrawMs += perfT2 - perfT1;
+            xdkHeapCheck("draw", runner);
             perfPresentMs += perfT3 - perfT2;
             // Every 60 rendered frames: where the time goes (game logic vs CPU draw vs GPU present).
             if (++perfFrames == 60) {
