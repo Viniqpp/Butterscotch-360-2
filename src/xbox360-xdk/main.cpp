@@ -776,6 +776,9 @@ VOID __cdecl main() {
             // intentional clear calls made by Draw Pre have already run.
             ((D3D9Renderer*)renderer)->skipNextClearScreen = true;
             Runner_drawViews(runner, gameW, gameH, false);
+            // A room whose views do not clear must not leave the skip armed for a game's own
+            // draw_clear later in the frame (Deltarune Ch5's darkness overlay turned cyan).
+            ((D3D9Renderer*)renderer)->skipNextClearScreen = false;
             renderer->vtable->endFrameInit(renderer);
             Runner_drawPost(runner, SCREEN_WIDTH, SCREEN_HEIGHT);
             renderer->vtable->endFrameEnd(renderer);

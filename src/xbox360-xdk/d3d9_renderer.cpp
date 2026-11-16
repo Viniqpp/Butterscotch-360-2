@@ -2722,7 +2722,7 @@ static void d3d9ClearScreen(Renderer* r, uint32_t color, float alpha) {
     D3D9Renderer* dr = (D3D9Renderer*)r;
     SURF_TRACE("SURF clear bound=%d color=%06X alpha=%.2f skip=%d\n", dr->boundTarget, color, alpha,
                dr->skipNextClearScreen);
-    if (dr->skipNextClearScreen) {
+    if (dr->skipNextClearScreen && dr->boundTarget == dr->appSurface) { // only the view pass's own clear
         dr->skipNextClearScreen = false;
         return;
     }
