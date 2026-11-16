@@ -289,6 +289,30 @@ static void xdkLoadInputScript(void) {
     xdkLog("BS: INPUT.TXT: %d scripted presses\n", g_inputScriptCount);
 }
 
+// Watchdog: when the game stops stepping for 5 seconds (an endless GML loop or a
+// stuck wait), log the GML call stack and bytecode position once so freezes
+// reported from the console or Xenia can be traced.
+static VMContext* volatile g_watchVm;
+static volatile uint32_t g_loopTick; // bumped every main-loop iteration
+
+static DWORD WINAPI xdkWatchdog(LPVOID) {
+    uint32_t lastTick = g_loopTick, stuckFor = 0;
+    bool reported = false;
+    for (;;) {
+        Sleep(1000);
+        uint32_t tick = g_loopTick;
+        if (tick != lastTick) { lastTick = tick; stuckFor = 0; reported = false; continue; }
+        if (++stuckFor < 5 || reported || !g_watchVm) continue;
+        reported = true;
+        VMContext* vm = g_watchVm; // racy read of a stopped thread's state: diagnostics only
+        xdkLog("BS: HANG: no progress for 5s at step %u, bytecode ip=0x%X\n", g_scriptStep, (unsigned)vm->ip);
+        int depth = 0;
+        for (CallFrame* f = vm->currentCallFrame; f && depth < 12; f = f->parent, depth++)
+            if (f->codeIndex < vm->dataWin->code.count)
+                xdkLog("BS: HANG:   in %s\n", vm->dataWin->code.entries[f->codeIndex].name);
+    }
+}
+
 static WORD xdkScriptedButtons(uint32_t step) {
     WORD mask = 0;
     for (int i = 0; i < g_inputScriptCount; i++)
@@ -523,6 +547,11 @@ VOID __cdecl main() {
     xdkLog("BS: creating VM\n");
     VMContext* vm = VM_create(dataWin);
     if (vm) XdkBuiltins_register(vm);
+    g_watchVm = vm;
+    { // hardware thread 1: the loader threads use 2-4
+        HANDLE watchdog = CreateThread(NULL, 64 * 1024, xdkWatchdog, NULL, CREATE_SUSPENDED, NULL);
+        if (watchdog) { XSetThreadProcessor(watchdog, 1); ResumeThread(watchdog); CloseHandle(watchdog); }
+    }
     // CONFIG.JSN "disassemble": ["gml_Object_x_Draw_0", ...] dumps those scripts to the log
     JsonValue* disasm = configRoot ? JsonReader_getJsonValueByKey(configRoot, "disassemble") : NULL;
     if (vm && disasm && JsonReader_isArray(disasm)) {
@@ -650,6 +679,7 @@ VOID __cdecl main() {
         XINPUT_STATE state;
         memset(&state, 0, sizeof(state));
         WORD buttons = 0;
+        g_loopTick++;
         bool controllerConnected = XInputGetState(0, &state) == ERROR_SUCCESS;
         WORD scripted = g_inputScriptCount ? xdkScriptedButtons(g_scriptStep) : 0;
         if (scripted) { // INPUT.TXT: as if pressed on the pad (keyboard mapping and gamepad both see it)
