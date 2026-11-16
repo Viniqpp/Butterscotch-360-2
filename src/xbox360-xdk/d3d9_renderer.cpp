@@ -1903,22 +1903,33 @@ static void d3d9DrawSpriteTiled(Renderer* renderer, int32_t tpagIndex, float ori
     float stepX = (float)t->sourceWidth * (xs < 0 ? -xs : xs);
     float stepY = (float)t->sourceHeight * (ys < 0 ? -ys : ys);
     if (stepX <= 0.0f || stepY <= 0.0f) return;
-    int nx = 1, ny = 1;
-    if (tileX && roomW > 0.0f) {
-        float countX = roomW / stepX;
-        nx = countX >= 127.0f ? 128 : (int)countX + 1;
+    // Like GameMaker, tile only the area the current target shows (in both directions):
+    // the viewport's corners mapped back into world space. Falls back to the room.
+    float minX = 0.0f, minY = 0.0f, maxX = roomW, maxY = roomH;
+    const float* m = dr->screenTransform.m;
+    float det = m[0] * m[5] - m[4] * m[1];
+    if (det != 0.0f && dr->viewportW > 0.0f && dr->viewportH > 0.0f) {
+        float cx[4] = { dr->viewportX, dr->viewportX + dr->viewportW, dr->viewportX, dr->viewportX + dr->viewportW };
+        float cy[4] = { dr->viewportY, dr->viewportY, dr->viewportY + dr->viewportH, dr->viewportY + dr->viewportH };
+        for (int k = 0; k < 4; k++) { // inverse of the 2D affine part of screenTransform
+            float px = cx[k] - m[12], py = cy[k] - m[13];
+            float wx = (m[5] * px - m[4] * py) / det, wy = (m[0] * py - m[1] * px) / det;
+            if (k == 0 || wx < minX) minX = wx;
+            if (k == 0 || wx > maxX) maxX = wx;
+            if (k == 0 || wy < minY) minY = wy;
+            if (k == 0 || wy > maxY) maxY = wy;
+        }
     }
-    if (tileY && roomH > 0.0f) {
-        float countY = roomH / stepY;
-        ny = countY >= 127.0f ? 128 : (int)countY + 1;
-    }
-    for (int iy = 0; iy < ny; iy++) for (int ix = 0; ix < nx; ix++) {
-        float dx = x + (tileX ? ix * stepX : 0.0f);
-        float dy = y + (tileY ? iy * stepY : 0.0f);
+    float left = x - originX * xs, top = y - originY * ys; // first tile's top-left
+    float startX = tileX ? left - ceilf((left - minX) / stepX) * stepX : left;
+    float startY = tileY ? top - ceilf((top - minY) / stepY) * stepY : top;
+    int nx = tileX ? (int)ceilf((maxX - startX) / stepX) + 1 : 1;
+    int ny = tileY ? (int)ceilf((maxY - startY) / stepY) + 1 : 1;
+    if (nx < 1 || ny < 1) return;
+    if (nx * ny > 4096) { nx = nx > 64 ? 64 : nx; ny = ny > 64 ? 64 : ny; } // degenerate scale: keep the frame alive
+    for (int iy = 0; iy < ny; iy++) for (int ix = 0; ix < nx; ix++)
         d3d9DrawSpritePart(renderer, tpagIndex, 0, 0, t->sourceWidth, t->sourceHeight,
-                           dx - originX * xs, dy - originY * ys, xs, ys, color, alpha);
-    }
-    (void)dr;
+                           startX + ix * stepX, startY + iy * stepY, xs, ys, color, alpha);
 }
 static void d3d9DrawSurface(Renderer* renderer, int32_t surfaceID, int32_t sl, int32_t st,
                             int32_t sw, int32_t sh, float x, float y, float xs, float ys,
