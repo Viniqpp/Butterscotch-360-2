@@ -85,7 +85,8 @@ static inline void bgrToFloatColor(uint32_t bgr, float alpha, float* outR, float
 typedef struct {
     void* rt;  // IDirect3DSurface9* (EDRAM)
     void* tex; // IDirect3DTexture9* the target is resolved into
-    int32_t w, h, allocW, allocH;
+    int32_t w, h, allocW, allocH; // logical size the game asked for (UVs use these)
+    float scale; // real pixels per logical pixel: < 1 when the target would not fit EDRAM
     bool exists;
     bool hasContent; // tex holds the last resolved image
 } D3D9Surface;
@@ -212,7 +213,8 @@ static void d3d9SetProjection(D3D9Renderer* dr, const Matrix4f* view, const Matr
 static bool d3d9BindTarget(D3D9Renderer* dr, int32_t id);
 static void d3d9ReleaseSurfaceObjects(D3D9Renderer* dr, D3D9Surface* s);
 static void d3d9BlitTexture(D3D9Renderer* dr, void* tex, int32_t allocW, int32_t allocH,
-                            int32_t sx, int32_t sy, int32_t w, int32_t h, float dx, float dy);
+                            int32_t sx, int32_t sy, int32_t w, int32_t h, float dx, float dy,
+                            float dstScale);
 static int32_t d3d9CreateSurface(Renderer* r, int32_t w, int32_t h);
 static void d3d9FreeSurfaces(D3D9Renderer* dr);
 static void d3d9LoadUserShaders(D3D9Renderer* dr, DataWin* dw);
@@ -984,7 +986,7 @@ static void d3d9BeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int
     // On the application surface the game draws at its own resolution;
     // the letterbox is applied once, when the surface is blitted.
     if (d3d9Surface(dr, dr->appSurface)) {
-        dr->renderScale = 1.0f;
+        dr->renderScale = d3d9Surface(dr, dr->appSurface)->scale;
         dr->renderOffsetX = dr->renderOffsetY = 0.0f;
     }
     dr->guiActive = false;
@@ -1662,7 +1664,7 @@ static int32_t d3d9CreateSpriteFromSurfaceModern(Renderer* renderer, int32_t sur
         return -1;
     }
     D3D9Surface* src = d3d9Surface(dr, surfaceID);
-    d3d9BlitTexture(dr, src->tex, src->allocW, src->allocH, x, y, w, h, 0.0f, 0.0f);
+    d3d9BlitTexture(dr, src->tex, src->allocW, src->allocH, x, y, w, h, 0.0f, 0.0f, d3d9Surface(dr, tmp)->scale);
     d3d9BindTarget(dr, prev);
     D3D9Surface* s = d3d9Surface(dr, tmp);
     int32_t page = d3d9AddPage(dr, s->tex, s->allocW, s->allocH);
@@ -2133,17 +2135,28 @@ static void d3d9DrawVertexBuffer(Renderer* renderer, VertexBuffer* vb, int32_t p
 static bool d3d9CreateSurfaceObjects(D3D9Renderer* dr, D3D9Surface* s, int32_t w, int32_t h) {
     IDirect3DDevice9* dev = Dev(dr);
     int32_t allocW = (w + 7) & ~7, allocH = (h + 7) & ~7; // same alignment as the Refresh hotfix
+    // EDRAM holds 10 MB: a bigger target (room-sized surfaces) is rendered at half or
+    // quarter resolution while the game keeps its logical size. Softer, but correct.
+    // shortcut: predicated tiling would keep full resolution, at far more complexity.
+    float scale = 1.0f;
+    while ((float)allocW * scale * (float)allocH * scale * 4.0f > 9.5f * 1024.0f * 1024.0f && scale > 0.125f)
+        scale *= 0.5f;
+    if (scale < 1.0f) { // keep the real size a multiple of 8 too
+        allocW = (w + 63) & ~63;
+        allocH = (h + 63) & ~63;
+        logInfo("D3D9: surface %dx%d exceeds EDRAM, rendered at %.0f%%\n", w, h, scale * 100.0f);
+    }
+    UINT realW = (UINT)(allocW * scale), realH = (UINT)(allocH * scale);
     IDirect3DTexture9* tex = NULL;
     IDirect3DSurface9* rt = NULL;
-    // shortcut: targets larger than EDRAM (10 MB) fail here; predicated tiling would lift that.
-    HRESULT hr = dev->CreateTexture((UINT)allocW, (UINT)allocH, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, NULL);
+    HRESULT hr = dev->CreateTexture(realW, realH, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &tex, NULL);
     if (SUCCEEDED(hr) && tex) {
         // All targets share EDRAM from tile 0: only one is bound at a time and
         // d3d9BindTarget resolves it out before switching. Without this, D3D gives
         // each its own EDRAM slice and creation fails once the 10 MB is used.
         D3DSURFACE_PARAMETERS edram;
         memset(&edram, 0, sizeof(edram));
-        hr = dev->CreateRenderTarget((UINT)allocW, (UINT)allocH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &rt, &edram);
+        hr = dev->CreateRenderTarget(realW, realH, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &rt, &edram);
     }
     if (FAILED(hr) || !tex || !rt) {
         logWarn("D3D9: surface %dx%d unavailable (hr=0x%08X)\n", w, h, (unsigned)hr);
@@ -2157,6 +2170,7 @@ static bool d3d9CreateSurfaceObjects(D3D9Renderer* dr, D3D9Surface* s, int32_t w
     s->h = h;
     s->allocW = allocW;
     s->allocH = allocH;
+    s->scale = scale;
     s->exists = true;
     s->hasContent = false;
     return true;
@@ -2186,7 +2200,8 @@ static void d3d9FreeSurfaces(D3D9Renderer* dr) {
 // Opaque copy of a texture region onto the bound target at pixel (dx, dy), with
 // the default shader and full colour writes (restores and surface_copy).
 static void d3d9BlitTexture(D3D9Renderer* dr, void* tex, int32_t allocW, int32_t allocH,
-                            int32_t sx, int32_t sy, int32_t w, int32_t h, float dx, float dy) {
+                            int32_t sx, int32_t sy, int32_t w, int32_t h, float dx, float dy,
+                            float dstScale) {
     IDirect3DDevice9* dev = Dev(dr);
     DWORD blend = TRUE, colorWrite = 0xF;
     dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
@@ -2199,7 +2214,8 @@ static void d3d9BlitTexture(D3D9Renderer* dr, void* tex, int32_t allocW, int32_t
     dev->SetPixelShader((IDirect3DPixelShader9*)dr->pPixelShader);
     static const float noFog[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
     dev->SetPixelShaderConstantF(D3D9_FOG_REGISTER, noFog, 1);
-    float xs[4] = { dx, dx + w, dx + w, dx }, ys[4] = { dy, dy, dy + h, dy + h };
+    float x0 = dx * dstScale, y0 = dy * dstScale, x1 = (dx + w) * dstScale, y1 = (dy + h) * dstScale;
+    float xs[4] = { x0, x1, x1, x0 }, ys[4] = { y0, y0, y1, y1 };
     d3d9DrawTextureQuad(dr, tex, xs, ys, (float)sx / allocW, (float)sy / allocH,
                         (float)(sx + w) / allocW, (float)(sy + h) / allocH, 0xFFFFFF, 1.0f);
     dev->SetPixelShader(shader);
@@ -2244,15 +2260,15 @@ static bool d3d9BindTarget(D3D9Renderer* dr, int32_t id) {
     }
     dr->boundTarget = id;
     if (next) { // surfaces are drawn at their own resolution; only the back buffer is letterboxed
-        dr->renderScale = 1.0f;
+        dr->renderScale = next->scale;
         dr->renderOffsetX = dr->renderOffsetY = 0.0f;
         if (next->hasContent)
-            d3d9BlitTexture(dr, next->tex, next->allocW, next->allocH, 0, 0, next->w, next->h, 0.0f, 0.0f);
+            d3d9BlitTexture(dr, next->tex, next->allocW, next->allocH, 0, 0, next->w, next->h, 0.0f, 0.0f, next->scale);
     } else {
         d3d9ComputeLetterbox(dr);
         dr->hostDirty = true;
         if (dr->hostHasCopy)
-            d3d9BlitTexture(dr, dr->hostCopy, hostW, hostH, 0, 0, dr->windowW, dr->windowH, 0.0f, 0.0f);
+            d3d9BlitTexture(dr, dr->hostCopy, hostW, hostH, 0, 0, dr->windowW, dr->windowH, 0.0f, 0.0f, 1.0f);
     }
     return true;
 }
@@ -2364,7 +2380,8 @@ static void d3d9SurfaceCopy(Renderer* r, int32_t dest, int32_t dx, int32_t dy, i
     if (!d3d9BindTarget(dr, dest)) return; // also resolves `src` if it was bound
     if (!part) { sx = sy = 0; w = from->w; h = from->h; }
     if (from->hasContent && w > 0 && h > 0)
-        d3d9BlitTexture(dr, from->tex, from->allocW, from->allocH, sx, sy, w, h, (float)dx, (float)dy);
+        d3d9BlitTexture(dr, from->tex, from->allocW, from->allocH, sx, sy, w, h, (float)dx, (float)dy,
+                        d3d9Surface(dr, dest)->scale);
     d3d9BindTarget(dr, previous);
 }
 // shortcut: no CPU readback (surface_getpixel, buffer_get_surface); resolved

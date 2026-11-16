@@ -330,8 +330,10 @@ static void xdkHeapCheck(const char* phase, Runner* runner) {
 // With "heapCheckRoom", the heap is also validated around every builtin call while
 // that room is current, naming the first call that leaves it damaged.
 static char g_heapCheckRoom[64];
+static const char* volatile g_lastBuiltin; // for the crash report below
 static void xdkBuiltinHeapHook(VMContext* ctx, const char* name, bool before) {
-    if (g_heapReported) return;
+    if (before) g_lastBuiltin = name;
+    if (g_heapReported || !g_heapCheckRoom[0]) return;
     Runner* runner = ctx->runner;
     if (!runner || !runner->currentRoom || !runner->currentRoom->name ||
         strcmp(runner->currentRoom->name, g_heapCheckRoom)) return;
@@ -340,6 +342,23 @@ static void xdkBuiltinHeapHook(VMContext* ctx, const char* name, bool before) {
     g_heapReported = true;
     xdkLog("BS: HEAP CORRUPTED %s builtin %s, in %s (status %d) at step %u\n", before ? "before" : "after",
            name, VM_getCurrentCallFrameCodeName(ctx), status, g_scriptStep);
+}
+
+// A crash inside a game step logs the GML script and the last builtin it called,
+// then continues to Xenia's/the console's normal crash handling.
+static int xdkCrashFilter(unsigned long code) {
+    VMContext* vm = g_watchVm;
+    xdkLog("BS: CRASH 0x%08lX during step %u: last builtin %s, script %s\n", code, g_scriptStep,
+           g_lastBuiltin ? g_lastBuiltin : "?",
+           vm && vm->currentCallFrame ? VM_getCurrentCallFrameCodeName(vm) : "?");
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void xdkStepGuarded(Runner* runner) {
+    __try {
+        Runner_step(runner);
+    } __except (xdkCrashFilter(GetExceptionCode())) {
+    }
 }
 
 static WORD xdkScriptedButtons(uint32_t step) {
@@ -571,7 +590,6 @@ VOID __cdecl main() {
         JsonValue* heapRoom = JsonReader_getJsonValueByKey(configRoot, "heapCheckRoom");
         if (heapRoom && JsonReader_getString(heapRoom)) {
             strncpy(g_heapCheckRoom, JsonReader_getString(heapRoom), sizeof(g_heapCheckRoom) - 1);
-            g_vmBuiltinHook = xdkBuiltinHeapHook;
         }
         JsonValue* trace = JsonReader_getJsonValueByKey(configRoot, "traceSurfaces");
         if (trace && JsonReader_isNumber(trace)) g_d3d9TraceSurfaces = (int)JsonReader_getDouble(trace);
@@ -584,6 +602,7 @@ VOID __cdecl main() {
     VMContext* vm = VM_create(dataWin);
     if (vm) XdkBuiltins_register(vm);
     g_watchVm = vm;
+    g_vmBuiltinHook = xdkBuiltinHeapHook; // records the last builtin for crash reports (cheap)
     { // hardware thread 1: the loader threads use 2-4
         HANDLE watchdog = CreateThread(NULL, 64 * 1024, xdkWatchdog, NULL, CREATE_SUSPENDED, NULL);
         if (watchdog) { XSetThreadProcessor(watchdog, 1); ResumeThread(watchdog); CloseHandle(watchdog); }
@@ -768,7 +787,7 @@ VOID __cdecl main() {
             // delta_time (microseconds): fixed step, so time-driven code (e.g. Deltarune
             // Ch5's music-synced pillars/lyrics) advances in step with the game.
             runner->deltaTime = (GMLReal)(targetFrameTime * 1000000.0);
-            Runner_step(runner);
+            xdkStepGuarded(runner);
             xdkHeapCheck("Runner_step", runner);
             accumulator -= targetFrameTime;
             gameFramesRan++;
